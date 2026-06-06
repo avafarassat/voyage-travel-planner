@@ -1,0 +1,997 @@
+## Latest state — Barcelona scheduling fixes are now stable after fresh Generate
+
+Context update:
+This section supersedes the older open-issue notes about Jul 2 brunch, Jul 4 meal collisions, Jul 4 afternoon breakfast, Jul 7 missing breakfast, and Jul 8 late activity.
+
+Do not continue from older assumptions unless they match this section.
+
+---
+
+## Current status
+
+A fresh Generate completed successfully after the latest fixes.
+
+Known core scheduling issues are now resolved:
+
+* Jul 2 Casa Batlló morning-anchor brunch works.
+* Jul 4 Montserrat excursion skips breakfast intentionally.
+* Jul 4 no longer has same-time meal collisions.
+* Jul 4 no longer has afternoon breakfast after Montserrat.
+* Jul 7 now has brunch/breakfast coverage.
+* Jul 8 no longer has late regular activity.
+* Jul 11 Antigua counts as dinner.
+* Cañete shows Lunch via `meal_type`.
+* Antigua shows Dinner via `meal_type`.
+* Major reservation anchors are preserved.
+* No commit has been made.
+
+---
+
+## Files changed in latest passes
+
+### Pass 1 — final reschedule writer fixes
+
+Files changed:
+
+* `lib/itinerary/reschedule-day.ts`
+* `lib/itinerary/schedule-times.ts`
+
+Changes:
+
+* Travel chaining now applies to all non-anchor stops, including meals.
+* Meal arrival floors now use the max of:
+
+  * `readyToLeave + travel`
+  * `afterAnchorMinutes`, when relevant
+  * late-brunch placed time
+  * meal window/opening-hour floor
+* Anchor math can no longer pull a meal before a prior stop ends.
+* Normal sightseeing/activity stops are capped so chaining cannot push them to late night.
+* Sacred anchors remain unchanged.
+* Meal-classified spacing guard was added:
+
+  * Checks all prior meal-classified stops on the day.
+  * Enforces latest prior meal end + 30-minute gap.
+  * Does not move sacred anchors.
+
+Confirmed after fresh Generate:
+
+* Jul 4 no same-time meal collision.
+* Jul 8 no late regular activity.
+* Casa Batlló, Icebarcelona, Montserrat, Cañete, and Antigua anchors preserved.
+
+---
+
+### Pass 2 — meal-slot and brunch fixes
+
+Files changed:
+
+* `lib/itinerary/meal-slots.ts`
+* `lib/itinerary/ensure-meals.ts`
+* `lib/itinerary/fill-sparse.ts`
+
+Changes:
+
+* `mealInsertionBounds` now treats `notAfter` as latest allowed START time.
+* Late brunch after morning anchors is supported.
+* `resolveMealStartMinutes` is shared from `meal-slots.ts`.
+* Breakfast/brunch must end before lunch with `MEAL_ACTIVITY_GAP`.
+* Long excursion days like Montserrat can intentionally skip breakfast.
+* Non-reserved breakfast/brunch that ends too close to reserved lunch is removed/skipped.
+* Breakfast skip reason logging was added.
+* `fill-sparse.ts` remained unchanged in the last Jul 7 fix.
+
+Confirmed after fresh Generate:
+
+* Jul 2 works:
+
+  * Casa Batlló 8:30 AM → brunch around 10:17–10:20 → lunch around 1:52–1:53 PM.
+* Jul 4 works:
+
+  * Montserrat 7:00 AM.
+  * No breakfast.
+  * No afternoon breakfast.
+  * No same-time meal collision.
+* Jul 7 works:
+
+  * Waffle Break 11:30 AM → lunch shifted to 1:05 PM.
+* Jul 11 works:
+
+  * Antigua 5:00 PM counts as dinner.
+  * No extra dinner restaurant.
+
+---
+
+## Latest Jul 7 fix
+
+Problem:
+
+* Jul 7 had La Pedrera at 9:00 AM and lunch at 12:00 PM.
+* Breakfast/brunch was skipped because La Pedrera ended around 11:00 AM, giving `notBefore ≈ 11:15`, while flexible lunch was still effectively capped at 12:00 PM, making `notAfter ≈ 10:30`.
+* Result: `breakfastBounds` returned null.
+
+Diagnosis:
+
+* The late-brunch band itself was not the problem for Casa-style anchors.
+* The issue was treating flexible lunch like a sacred noon boundary.
+* Jul 7 lunch was flexible, not reserved.
+
+Files changed:
+
+* `lib/itinerary/meal-slots.ts`
+* `lib/itinerary/ensure-meals.ts`
+
+Changes:
+
+* Added `effectiveLunchStartForBreakfastBounds`.
+
+  * Sacred/reserved lunch uses fixed time.
+  * Flexible lunch uses lunch window end, around 2:00 PM.
+* Added pre-anchor breakfast attempt for local morning anchors.
+* Local anchors in late-brunch band still use anchor end + 15.
+* Longer local anchors can allow post-anchor brunch after anchor end + gap.
+* `resolveMealStartMinutes` supports post-band brunch, such as 11:30 AM.
+* `mealStopsToRemove` only enforces breakfast/lunch proximity against reserved lunch.
+* `ensure-meals.ts` shifts flexible lunch later when breakfast/brunch is inserted too close.
+
+Confirmed after fresh Generate:
+
+* Jul 7 now has Waffle Break at 11:30 AM.
+* Lunch shifted to 1:05 PM.
+* No duplicate meal times.
+* Anchors preserved.
+
+---
+
+## Latest validation summary
+
+Fresh Generate results:
+
+| Check                           | Result                                                                        |
+| ------------------------------- | ----------------------------------------------------------------------------- |
+| Jul 2 Casa Batlló brunch        | Pass — 8:30 AM anchor → brunch around 10:17–10:20 → lunch around 1:52–1:53 PM |
+| Jul 4 Montserrat breakfast skip | Pass — no breakfast, intentional excursion-day skip                           |
+| Jul 4 same-time meal collision  | Pass — no duplicate meal times                                                |
+| Jul 4 afternoon breakfast       | Pass — removed/prevented                                                      |
+| Jul 7 breakfast/brunch          | Pass — Waffle Break 11:30 AM → lunch 1:05 PM                                  |
+| Jul 8 late regular activity     | Pass — no regular activity after 8 PM                                         |
+| Jul 11 Antigua                  | Pass — 5:00 PM counts as dinner, no extra dinner restaurant                   |
+| Cañete badge                    | Pass — `meal_type: lunch`                                                     |
+| Antigua badge                   | Pass — `meal_type: dinner`                                                    |
+| Anchors                         | Pass — Casa Batlló, Icebarcelona, Montserrat, Cañete, Antigua preserved       |
+| Repeated restaurant brands      | Previously passed; re-check if doing final QA                                 |
+| Manual places                   | Previously passed; re-check if doing final QA                                 |
+
+---
+
+## Current recommendation
+
+Do not make more scheduling changes unless final QA finds a concrete issue.
+
+Next step should be either:
+
+1. Final read-only QA pass across all 12 days, then commit.
+2. Ask for `git status` and commit summary, then commit if approved.
+
+Do not tune Jul 4 late lunch yet unless the user explicitly wants itinerary quality polish. It is no longer a correctness bug.
+
+---
+
+## Suggested next Cursor prompt
+
+Use this in a fresh Cursor chat:
+
+```text
+@SESSION_HANDOFF.md
+
+Read the latest-state section first and use it as the source of truth.
+
+The Barcelona scheduling fixes are now mostly stable after fresh Generate. Do not make code changes yet.
+
+Do not scan the whole codebase.
+Do not edit smart-generate.ts.
+Do not refactor.
+Do not commit or push.
+
+First do a read-only final QA pass across all 12 Barcelona days.
+
+Check:
+- breakfast/lunch/dinner coverage, noting Jul 4 intentional breakfast skip
+- no breakfast after lunch
+- no same-time meal collisions
+- no regular activity after 8 PM unless nightlife/bar
+- anchors preserved: Casa Batlló, Icebarcelona, Montserrat, Cañete, Antigua
+- no repeated restaurant brands
+- manual places exactly once
+- Cañete Lunch badge and Antigua Dinner badge
+- drag-and-drop does not trigger full-screen loading
+
+Then report:
+1. pass/fail table
+2. any remaining issue, if found
+3. git status
+4. recommended commit message
+
+Do not edit or commit until I explicitly approve.
+```
+
+---
+
+## Suggested commit message if final QA passes
+
+```text
+Fix Barcelona itinerary meal timing and reschedule rhythm
+```
+
+
+## add before starting new Cursor chat
+
+Context update:
+Pass 1 and Pass 2 were implemented after the original handoff. Do not assume the previous handoff is fully current unless this section is included.
+
+Pass 1 — completed
+Files changed:
+- lib/itinerary/reschedule-day.ts
+- lib/itinerary/schedule-times.ts
+
+Changes:
+- Travel chaining now applies to all non-anchor stops, including meals.
+- Meal arrival floor now uses the max of:
+  - readyToLeave + travel
+  - afterAnchorMinutes, when relevant
+  - late-brunch placed time
+  - meal window floor / opening-hour floor
+- Anchor math can no longer pull lunch before a prior museum/activity ends.
+- Non-nightlife sightseeing is capped so chained travel does not push activities/tours/museums/monuments to late night.
+- Sacred anchors remain unchanged.
+
+Pass 1 confirmed:
+- Jul 8 regular activity at 11:06 PM was fixed.
+- Casa Batlló 8:30 AM preserved.
+- Icebarcelona 8:45 PM preserved.
+- Montserrat 7:00 AM preserved.
+- Cañete 12:00 PM preserved.
+- Antigua 5:00 PM preserved.
+
+Pass 2 — completed
+Files changed:
+- lib/itinerary/meal-slots.ts
+- lib/itinerary/ensure-meals.ts
+- lib/itinerary/fill-sparse.ts
+
+Changes:
+- mealInsertionBounds now treats notAfter as latest allowed START time.
+- Late brunch after morning anchors is supported with a 10:15–10:45 target band.
+- resolveMealStartMinutes is shared from meal-slots.ts.
+- Breakfast/brunch must end before lunch with MEAL_ACTIVITY_GAP.
+- Long excursion days like Montserrat can intentionally skip breakfast rather than forcing afternoon breakfast.
+- Non-reserved breakfast/brunch that ends too close to reserved lunch is removed/skipped.
+- Breakfast skip reason logging added.
+
+Pass 2 confirmed after fresh Generate:
+- Jul 2 Option B brunch works:
+  Casa Batlló 8:30 AM → brunch 10:20 AM → monument 11:43 AM → lunch 1:42 PM → dinner 7:00 PM.
+- Jul 4 excursion breakfast skip works:
+  no breakfast; Montserrat remains 7:00 AM.
+- Jul 7 spacing works:
+  no 11:39 AM / 12:00 PM restaurant stack.
+- Jul 8 late activity fix still holds.
+- Jul 11 passes:
+  breakfast → lunch → activity → Antigua 5:00 PM dinner → nightlife.
+- Anchors preserved:
+  Casa Batlló, Icebarcelona, Montserrat, Cañete, Antigua.
+
+Remaining issue:
+- Jul 4 still has two restaurant/meal-classified stops both at 1:55 PM after regenerate.
+- This is now the only known targeted bug.
+- Likely needs a small meal-classified spacing guard in final reschedule.
+- Do not reopen broad meal-slot logic unless the reschedule guard fails.
+
+Next target:
+Inspect only:
+- lib/itinerary/reschedule-day.ts
+- lib/itinerary/schedule-times.ts only if mirror consistency is needed
+
+Goal:
+Prevent same-time or overlapping meal-classified stops during final reschedule.
+
+Rules for the fix:
+- If current stop and prior scheduled stop are both meal-classified or restaurant-like, enforce 30–45 minute minimum spacing.
+- Never move sacred reservation anchors.
+- If one stop is reserved and the other is not, move the non-reserved stop.
+- If both are non-reserved, move the later one forward enough to avoid overlap.
+- If moving would violate meal/latest-start constraints, report it instead of silently creating overlap.
+- Preserve prior fixes: no 11 PM regular activities, travel chaining for all non-anchor stops, anchors preserved.
+
+Latest remaining issue:
+- Meal collision guard was implemented in reschedule-day.ts and schedule-times.ts.
+- It checks all prior meal-classified stops on the day and enforces latestPriorMealEnd + 30 min.
+- Fresh Generate confirmed Jul 4 no longer has two meals at 1:55 PM; lunch moved to 3:25 PM.
+- Jul 2 brunch still works.
+- Jul 7 spacing still works.
+- Jul 8 late activity still fixed.
+- Anchors preserved.
+- Remaining bug: Jul 4 still has an afternoon breakfast at 1:55 PM after Montserrat.
+- Desired behavior: true early excursion days like Montserrat may skip breakfast; do not force afternoon breakfast/brunch.
+
+# Voyage — Barcelona Itinerary Scheduling Handoff
+
+## How Cursor should use this file
+
+This is the source of truth for the current Voyage scheduling/debugging task.
+
+Cursor context gets bloated quickly, especially in Agent mode. Do not rely on long chat memory. Read this file first, keep the working context narrow, and avoid broad codebase scans unless necessary.
+
+Working rules:
+
+* Before editing, identify the smallest set of files needed.
+* Do not scan the whole codebase unless necessary.
+* Do not rewrite large fragile files unless the targeted fix requires it.
+* Do not commit or push unless the user explicitly asks.
+* Existing DB itinerary data may be stale after code changes.
+* A fresh full Generate itinerary run is required before judging whether latest scheduling code works.
+* If context usage gets high, summarize changed files, decisions, remaining bugs, and next steps, then continue in a new chat.
+
+---
+
+# Current task
+
+Fix itinerary time scheduling and mandatory day rhythm for the Barcelona 12-day test trip.
+
+Every day must follow this rhythm:
+
+```text
+breakfast
+→ 1–2 morning activities
+→ lunch
+→ 1–2 afternoon activities
+→ dinner
+→ nightlife
+```
+
+The structure is now mostly correct, but latest reported issues were:
+
+* Breakfast scheduled after lunch.
+
+  * Example: Jul 2 had 12:30 PM “breakfast” after a 12:00 PM lunch.
+* Same-time meal collisions.
+
+  * Example: Jul 4 had breakfast and lunch both at 1:55 PM.
+* Back-to-back meals with no activity between.
+
+  * Example: Jul 5.
+* Earlier issues included repeated Billy Brunch restaurants, EatMyTrip before 9 AM, Jul 11 all restaurants, and empty/missing-meal days.
+
+Latest code work tightened meal-slot logic in `meal-slots.ts`.
+
+Status:
+
+* User has not confirmed a successful regenerate after the latest `meal-slots.ts` pass.
+* Treat DB itinerary rows as stale until a full Generate itinerary run has completed.
+
+---
+
+# Project context
+
+| Item        | Value                                                            |
+| ----------- | ---------------------------------------------------------------- |
+| App         | Voyage                                                           |
+| Path        | `~/travel-planner`                                               |
+| Stack       | Next.js 15 · React 19 · Supabase · Google Maps/Places · Tailwind |
+| Test trip   | Barcelona 2026                                                   |
+| Dates       | Jul 1–12, 2026                                                   |
+| Trip length | 12 days                                                          |
+| Trip ID     | `8ed96750-9eaa-4f81-9967-72da883cae74`                           |
+| Dev command | `npm run dev`                                                    |
+| Dev URL     | `http://localhost:3000`                                          |
+| Git rule    | Do not commit or push unless user explicitly asks                |
+
+Clean restart if needed:
+
+```bash
+cd ~/travel-planner
+pkill -f "next dev"
+rm -rf .next
+npm run dev
+```
+
+---
+
+# Mandatory product rules — do not regress
+
+## 1. Day rhythm is mandatory
+
+Every generated day should follow:
+
+```text
+breakfast → morning activities → lunch → afternoon activities → dinner → nightlife
+```
+
+Do not order days by stale `sort_order` or raw clock time alone if that violates phase rhythm. Stops must be sorted and chained by phase.
+
+Relevant file:
+
+* `lib/itinerary/day-rhythm.ts`
+
+## 2. Reservation anchors are sacred
+
+User reservations must never be shifted by travel chaining.
+
+Examples:
+
+* Casa Batlló at 8:30 AM stays 8:30 AM.
+* Icebarcelona at 8:45 PM stays 8:45 PM.
+* Reserved restaurants should keep their reservation time and receive the correct `meal_type`.
+
+Do not let `recomputeScheduleTimes` or `rescheduleStopsFromOrder` move anchors.
+
+## 3. Meals must respect opening hours
+
+Meals cannot be scheduled before the restaurant opens.
+
+Important breakfast rule:
+
+* Breakfast default floor is 9:00 AM when opening hours are unknown.
+
+Relevant functions/files:
+
+* `getMealEarliestMinutes`
+* `resolveMealArrivalMinutes`
+* `lib/itinerary/hours.ts`
+
+## 4. Breakfast can become brunch after a morning anchor
+
+If a morning reservation makes breakfast impossible, do not force breakfast before it.
+
+Example:
+
+* Casa Batlló at 8:30 AM.
+* If no early-open restaurant fits before it, schedule brunch after the visit, around 10:15 AM or later.
+* But do not schedule “breakfast” after lunch.
+
+Relevant files:
+
+* `lib/itinerary/meal-slots.ts`
+* `lib/itinerary/smart-generate.ts`
+* `lib/itinerary/day-rhythm.ts`
+
+## 5. Three meals every day, but only one per meal type
+
+Every trip day must have:
+
+* breakfast
+* lunch
+* dinner
+
+But there should only be one stop per `meal_type`.
+
+Do not create:
+
+* duplicate breakfasts
+* duplicate lunches
+* duplicate dinners
+* breakfast after lunch
+* breakfast/lunch at the same timestamp
+* multiple back-to-back meal stops with no activity between, unless unavoidable due to reservations
+
+Relevant files:
+
+* `lib/itinerary/ensure-meals.ts`
+* `lib/itinerary/meal-slots.ts`
+
+## 6. Reserved restaurants need meal labels
+
+If a reserved restaurant falls into a meal window, it should get `meal_type`.
+
+Example:
+
+* Cañete at noon should have `meal_type: lunch`.
+* Antigua at 5 PM should count as dinner.
+
+UI badge rule:
+
+* Show meal badge when `meal_type` is set.
+* Do not require `stop_type === "meal"`.
+
+Relevant files:
+
+* `lib/itinerary/hours.ts`
+* `lib/itinerary/meal-locations.ts`
+* `components/trip/itinerary-section.tsx`
+
+## 7. Manual places are mandatory
+
+Every `source = 'manual'` place must appear exactly once per trip.
+
+Manual places are not optional suggestions. They must not be dropped because a suggested place has the same `google_place_id`.
+
+If duplicate Google IDs exist:
+
+* dedupe trip-wide by `google_place_id`
+* prefer manual over suggested
+* evict suggested duplicate if needed
+
+Relevant files:
+
+* `lib/itinerary/manual-places.ts`
+* `lib/itinerary/smart-generate.ts`
+* `lib/itinerary/suggestion-exclusions.ts`
+* `lib/itinerary/day-place-usage.ts`
+
+## 8. Suggested places stay out of My Places
+
+`source = 'suggested'` places are for generation/Discover pools.
+
+They should not appear in My Places unless the user manually saves them.
+
+Map rules:
+
+* My Map = manual places only.
+* Plan map = itinerary stops only.
+* Plan map can filter by selected itinerary day.
+
+## 9. Two-pass scheduling must stay consistent
+
+This has caused repeated regressions.
+
+There are two timing passes:
+
+```text
+Placement pass:
+addMeal, scheduleManualPlacesForDay, addBreakfastAfterMorningAnchor, ensureTripMeals, fillSparseDaysForTrip
+
+Recompute/reschedule pass:
+finalizeDayTimes → recomputeScheduleTimes
+rescheduleStopsFromOrder
+```
+
+If a fix only updates placement logic, a later recompute can overwrite it.
+
+Any fix to meal timing, opening hours, anchors, rhythm order, meal-slot bounds, duplicate meal cleanup, or visit caps must also be reflected in:
+
+* `recomputeScheduleTimes`
+* `rescheduleStopsFromOrder`
+
+Relevant files:
+
+* `lib/itinerary/schedule-times.ts`
+* `lib/itinerary/reschedule-day.ts`
+
+## 10. UX loading rules
+
+Full-screen loading overlay only on Generate.
+
+Do not hide the whole itinerary during:
+
+* drag-and-drop
+* directions fetch
+* small reschedules
+* stop edits
+
+Drag should use a per-day spinner. Directions fetch should be non-blocking.
+
+Relevant file:
+
+* `components/trip/itinerary-section.tsx`
+
+---
+
+# Verified generate pipeline order
+
+Current intended generation pipeline:
+
+```text
+generateSmartItinerary
+→ insert stops
+→ fillSparseDaysForTrip
+→ enrichPlacesOpeningHours
+→ ensureTripMeals
+→ enrichPlacesOpeningHours for newly added meal places
+→ rescheduleAllItineraryDaysForTrip
+```
+
+Important:
+
+* `ensureTripMeals` must run after initial generate/fill and before final reschedule.
+* New meal places need opening hours enriched before final reschedule.
+* Final reschedule must preserve rhythm, opening hours, meal floors, meal-slot bounds, and reservation anchors.
+
+Relevant routes:
+
+* `app/api/itinerary/generate/route.ts`
+* `app/api/itinerary/fill-sparse-days/route.ts`
+
+---
+
+# Latest key learnings and decisions
+
+## 1. Exclude list was poisoning Google search
+
+Major root cause:
+
+* 333 stale suggested place rows were all excluded from Google search.
+* This blocked meal/activity insertion and caused empty or sparse days.
+
+Fix:
+
+* `getSuggestionExcludeGoogleIds` now excludes only:
+
+  * manual places
+  * current itinerary stops
+* It should not exclude every suggested row in the DB.
+* `ensure-meals.ts` uses the narrowed exclude list.
+* `smart-generate.ts` uses `savedGoogleIds = manual only`.
+
+Relevant file:
+
+* `lib/itinerary/suggestion-exclusions.ts`
+
+## 2. Trip-wide restaurant brand dedupe is required
+
+Problem:
+
+* “Billy Brunch,” “Billy Brunch Headquarters,” and “Billy Brunch & Park” had different Google IDs and kept repeating.
+
+Fix:
+
+* Added `meal-dedup.ts`.
+* `restaurantBrandKey()` uses a brand-level key, roughly first 2 words.
+* Used in:
+
+  * Google meal fetch
+  * `ensure-meals.ts`
+  * `fill-sparse.ts`
+  * `smart-generate.ts`
+
+Relevant file:
+
+* `lib/itinerary/meal-dedup.ts`
+
+## 3. Late brunch needed special rhythm handling
+
+Problem:
+
+* `meal_type: breakfast` always sorted as phase 0.
+* Brunch after Casa Batlló appeared before the anchor in the UI.
+
+Fix:
+
+* `day-rhythm.ts` treats breakfast after 10 AM but before lunch as MORNING phase.
+* Added timing logic like `minutesAfterPriorMorningAnchors()`.
+
+Relevant file:
+
+* `lib/itinerary/day-rhythm.ts`
+
+## 4. Anchor/overlap timing had to respect meal floors
+
+Problem:
+
+* `resolveMealArrivalMinutes` had an anchor-cap branch that forced impossible 8 AM breakfast before the 9 AM floor.
+
+Fix:
+
+* `hours.ts`, `schedule-times.ts`, and `reschedule-day.ts` now handle:
+
+  * brunch after morning anchor
+  * `getMealEarliestMinutes`
+  * travel chaining where arrival must be at least `readyToLeave + travel`
+
+Relevant files:
+
+* `lib/itinerary/hours.ts`
+* `lib/itinerary/schedule-times.ts`
+* `lib/itinerary/reschedule-day.ts`
+
+## 5. Reserved restaurant meal slots need better inference
+
+Problem:
+
+* Antigua at 5 PM did not count as dinner.
+* System added a fourth restaurant unnecessarily.
+
+Fix:
+
+* `inferMealTypeFromMinutes` treats 4 PM+ as dinner.
+* `dayMissingMeals` uses `reservation_time`.
+
+Relevant files:
+
+* `lib/itinerary/hours.ts`
+* `lib/itinerary/meal-locations.ts`
+
+## 6. Meal-slot enforcement is the latest critical fix
+
+Problem examples:
+
+* Jul 2: 12:30 PM “breakfast” after 12:00 PM lunch.
+* Jul 4: breakfast and lunch both at 1:55 PM.
+* Jul 5: meals back-to-back with no activity between.
+
+Fix:
+
+* New `meal-slots.ts`.
+* Enforces one slot per meal type.
+* Enforces insertion windows.
+* Skips afternoon breakfast on excursion days.
+* Dedupes invalid meals.
+* Skips breakfast if it cannot end before lunch.
+* Prevents same-time breakfast/lunch collisions.
+* Helps require sightseeing between breakfast and lunch where expected.
+
+Relevant file:
+
+* `lib/itinerary/meal-slots.ts`
+
+## 7. Sparse days need sightseeing minimums, not just stop count
+
+Problem:
+
+* Jul 11 could have enough total stops but still be all restaurants.
+* `dayIsSparse` only counted total stops.
+
+Fix:
+
+* `fill-sparse.ts` now treats days as needing fill if `countSightseeingStops < 2`.
+
+Relevant file:
+
+* `lib/itinerary/fill-sparse.ts`
+
+---
+
+# Smallest relevant file set
+
+Use this set before broad codebase scans.
+
+| Area                        | Path                                          |
+| --------------------------- | --------------------------------------------- |
+| Meal slots                  | `lib/itinerary/meal-slots.ts`                 |
+| Meal guarantee              | `lib/itinerary/ensure-meals.ts`               |
+| Exclude logic               | `lib/itinerary/suggestion-exclusions.ts`      |
+| Restaurant brand dedupe     | `lib/itinerary/meal-dedup.ts`                 |
+| Day rhythm / phase sort     | `lib/itinerary/day-rhythm.ts`                 |
+| Opening hours / meal floors | `lib/itinerary/hours.ts`                      |
+| Placement pass              | `lib/itinerary/smart-generate.ts`             |
+| Recompute pass              | `lib/itinerary/schedule-times.ts`             |
+| Reschedule pass             | `lib/itinerary/reschedule-day.ts`             |
+| Reschedule DB helper        | `lib/itinerary/apply-reschedule.ts`           |
+| Sparse fill                 | `lib/itinerary/fill-sparse.ts`                |
+| Missing meals helper        | `lib/itinerary/meal-locations.ts`             |
+| Google meal fetch           | `lib/itinerary/google-places.ts`              |
+| Generate API                | `app/api/itinerary/generate/route.ts`         |
+| Page-load fill API          | `app/api/itinerary/fill-sparse-days/route.ts` |
+| UI badges                   | `components/trip/itinerary-section.tsx`       |
+| Verification                | `scripts/verify-handoff.mjs`                  |
+
+Note:
+
+* `lib/itinerary/smart-generate.ts` has `@ts-nocheck`.
+* It was previously recovered/patched and is fragile.
+* Make minimal targeted edits.
+
+---
+
+# Bugs found, root causes, and current status
+
+| Bug                              | Root cause                                                           | Status                                     |
+| -------------------------------- | -------------------------------------------------------------------- | ------------------------------------------ |
+| Almost no meals / empty days     | 333-place exclude list blocked suggestions                           | Fixed in code; needs regenerate to confirm |
+| Billy Brunch repeated            | Different Google IDs, no brand dedupe                                | Fixed with `meal-dedup.ts`                 |
+| EatMyTrip 8 AM despite 9 AM open | Anchor cap bypassed breakfast floor                                  | Fixed in code                              |
+| Brunch listed before Casa Batlló | Breakfast always phase 0                                             | Fixed in `day-rhythm.ts`                   |
+| Breakfast 12:30 PM after lunch   | No meal-slot bounds/cleanup                                          | Fixed in `meal-slots.ts`                   |
+| Jul 4 breakfast/lunch same time  | Duplicate meal insert, no slot collision prevention                  | Fixed in `meal-slots.ts`                   |
+| Jul 5 meals back-to-back         | No activity-between-meals check                                      | Fixed in `fill-sparse.ts` / slot logic     |
+| Jul 11 all restaurants           | Sparse detection only counted stop count                             | Fixed with sightseeing minimum             |
+| Cañete badge missing             | UI required `stop_type === "meal"`                                   | Fixed; badge reads `meal_type`             |
+| Antigua 5 PM not dinner          | Dinner inference started too late                                    | Fixed with 4 PM+ dinner inference          |
+| Sagrada missing                  | Manual place skipped because suggested duplicate used same Google ID | Fixed with manual-over-suggested dedupe    |
+| Park Güell duplicate             | Manual and suggested rows shared same Google ID                      | Fixed with Google ID dedupe; manual wins   |
+| Tours/hikes too late             | Recompute ignored visit caps                                         | Fixed in schedule/reschedule paths         |
+| Gatsby nightlife in morning      | Reschedule preserved bad arrival when adjustment returned null       | Fixed in code; requires regenerate         |
+| Hydration overlay in browser     | Cursor `data-cursor-ref` injection                                   | Not app bug; hard refresh                  |
+| `ERR_CONNECTION_REFUSED`         | Dev server stopped                                                   | Restart dev server                         |
+
+User said the structure was “overall correct now” before the latest meal-slot pass. A regenerate after `meal-slots.ts` has not yet been confirmed.
+
+---
+
+# Current constraints
+
+* Do not commit or push unless user explicitly asks.
+* `smart-generate.ts` has `@ts-nocheck`; minimal edits only.
+* Page-load fill-sparse runs once per session via `sparseFillRef`; full Generate is required for a clean fresh pipeline.
+* Existing `itinerary_stops.scheduled_time` values are not auto-migrated.
+* `SUPABASE_SERVICE_ROLE_KEY` is optional.
+* `scripts/verify-handoff.mjs` skips full DB checks without service role key.
+* Browser automation can cause false hydration errors.
+* Dev server may need clean restart if ports/cache get weird.
+* Trip is now 12 days, not 15.
+
+---
+
+# Exact next steps
+
+## 1. Regenerate — required
+
+```bash
+cd ~/travel-planner
+npm run dev
+```
+
+If needed:
+
+```bash
+pkill -f "next dev"
+rm -rf .next
+npm run dev
+```
+
+Then:
+
+1. Open trip `8ed96750-9eaa-4f81-9967-72da883cae74`.
+2. Go to Plan.
+3. Click Generate itinerary.
+4. Wait for full rebuild.
+
+Expected runtime:
+
+* approximately 30–60 seconds.
+
+## 2. Spot-check priority days
+
+| Day    | Pass criteria                                                                                                    |
+| ------ | ---------------------------------------------------------------------------------------------------------------- |
+| Jul 2  | Casa Batlló 8:30 AM first; brunch after Casa if needed; brunch around 10:15+ and ≥9 AM; no breakfast after lunch |
+| Jul 4  | Montserrat 7:00 AM anchor; no duplicate 1:55 PM meal pair; no afternoon “breakfast”                              |
+| Jul 5  | Breakfast → at least 1 activity → lunch; no consecutive restaurant stack                                         |
+| Jul 6  | Cañete shows Lunch badge; breakfast and dinner also present                                                      |
+| Jul 11 | At least 2 sightseeing stops; Antigua 5 PM counts as dinner; no extra dinner restaurant                          |
+| All 12 | Correct rhythm order; no overlaps; no repeated restaurant brands; manual places once                             |
+
+## 3. If something still fails
+
+Document:
+
+* date/day number
+* stop name
+* wrong time
+* wrong meal type
+* whether `meal_type` exists
+* whether it happened after fresh Generate
+* whether it is an inserted meal, reserved restaurant, manual place, or suggested place
+
+Trace in this order:
+
+1. Duplicate meal types still in DB?
+
+   * Check `mealStopsToRemove`.
+   * Check `mealInsertionBounds`.
+2. Is `ensureTripMeals` inserting when bounds return null?
+3. Is `fill-sparse` adding meals before `ensureTripMeals` cleanup?
+4. Is reschedule failing to chain times?
+
+   * Check `schedule-times.ts`.
+   * Check `reschedule-day.ts`.
+5. Is `sort_order` stale or wrong?
+
+   * Check `rhythmSortOrderUpdates`.
+   * Check `day-rhythm.ts`.
+6. Did Google search exclude too much again?
+
+   * Check `suggestion-exclusions.ts`.
+7. Did brand dedupe miss another same-brand restaurant?
+
+   * Check `restaurantBrandKey`.
+8. Did a reserved restaurant fail meal inference?
+
+   * Check `inferMealTypeFromMinutes`.
+   * Check `dayMissingMeals`.
+
+Optional verification:
+
+```bash
+node scripts/verify-handoff.mjs
+```
+
+For full DB checks, add `SUPABASE_SERVICE_ROLE_KEY` to `.env.local`.
+
+---
+
+# Acceptance criteria
+
+The task is stable when:
+
+* Fresh Generate itinerary has completed.
+* All 12 days have breakfast, lunch, and dinner.
+* There is only one stop per meal type per day.
+* No breakfast appears after lunch.
+* No breakfast/lunch/dinner share the same timestamp unless it is the same reserved restaurant being interpreted correctly.
+* Meal times respect opening hours.
+* Breakfast defaults to 9:00 AM minimum when hours are unknown.
+* Morning reservations stay fixed.
+* Brunch is placed after morning reservations when needed.
+* Rhythm order is correct across all 12 days.
+* At least 1–2 activities appear between meals where expected.
+* Reserved restaurants show meal badges.
+* Cañete shows Lunch.
+* Antigua at 5 PM counts as dinner.
+* Casa Batlló remains 8:30 AM.
+* Icebarcelona remains 8:45 PM.
+* No nightlife appears in the morning.
+* No outdoor/tour activity appears late at night.
+* No repeated restaurant brands trip-wide.
+* Manual places appear exactly once.
+* Park Güell appears once.
+* Drag-and-drop does not hide the whole itinerary.
+* Stale DB data has been regenerated.
+
+---
+
+# Open product question
+
+If Jul 2 has no brunch because the morning window is full and lunch is at 12:00 PM, ask the user to choose the desired behavior:
+
+Option A:
+
+* Skip breakfast for that day because breakfast/brunch cannot fit cleanly before lunch.
+
+Option B:
+
+* Show an explicit “Brunch” label after the morning anchor and treat it as the breakfast slot, even if it is close to lunch.
+
+Do not silently insert a 12:30 PM breakfast after lunch.
+
+---
+
+# Good first message for a new Cursor chat
+
+```text
+@SESSION_HANDOFF.md
+
+Read this handoff first and use it as the source of truth.
+
+Continue Barcelona 12-day itinerary scheduling validation for Voyage.
+
+Trip ID: 8ed96750-9eaa-4f81-9967-72da883cae74.
+
+Latest code includes meal-slots.ts for one meal per type, no breakfast after lunch, no same-time meal collisions, and better sparse-day sightseeing requirements.
+
+Do not scan the whole codebase yet. Do not commit or push unless I explicitly ask.
+
+First:
+1. Tell me the smallest set of files you need to inspect.
+2. Verify the generate pipeline order.
+3. Then help me regenerate and spot-check Jul 2, Jul 4, Jul 5, Jul 6, Jul 11, and all 12 days.
+```
+
+After regenerate, use one of these:
+
+```text
+I regenerated. All 12 days look good.
+```
+
+or:
+
+```text
+I regenerated. Jul X still has [specific issue].
+```
+
+---
+
+# Lower-priority backlog
+
+Do not mix these into the current scheduling fix unless explicitly asked.
+
+* Deploy to Vercel.
+* Edit saved place UI.
+* Plan map day filter polish.
+* Map route polyline.
+* Experience booking links.
+* Wider Plan column.
+* Data audit for suggested/manual source issues.
+* Automated tests for `hours.ts`, `meal-slots.ts`, and rhythm sorting.
+* Rewrite/type `smart-generate.ts` and remove `@ts-nocheck`.
+* Add opening-hours conflict warnings in UI.
+* Add “Reschedule all days” button.

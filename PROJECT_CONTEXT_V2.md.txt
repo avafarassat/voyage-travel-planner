@@ -1,0 +1,459 @@
+🛠️ Project Overview & Live Environment
+Voyage (~/travel-planner) is an intelligent travel orchestration web app that integrates logistics (flights, lodging, transit) with an automated, constraint-aware itinerary generation engine.
+
+Core Stack: Next.js 15, React 19, Supabase (Auth + Postgres + RLS), Tailwind v4, shadcn/ui, @dnd-kit.
+
+Active Test Asset: Barcelona 2026 | Trip ID: 8ed96750-9eaa-4f81-9967-72da883cae74.
+
+Trip Scope: Recently adjusted from 15 days down to 12 days (Jul 1–12, 2026).
+
+Local Address: http://localhost:3000 (Fallback to 3002/3003 if ports are ghosted by stale tasks).
+
+🧭 Unbreakable Product & Design Rules
+Manual Places Guarantee: Every venue with source = 'manual' (15 spots in Barcelona, including Sagrada Família and pinned reservations) must appear exactly once. They are mandatory anchors and cannot be dropped or substituted for suggestions.
+
+Sacred Reservation Anchors: User-pinned reservation times are absolute. The time-chaining travel engine must never shift or travel-chain over them (e.g., Icebarcelona at 8:45 PM on Jul 3).
+
+Strict Global Deduplication: Venues are deduplicated trip-wide via their unique google_place_id. If a conflict occurs between a manual user addition and a generator suggestion, the manual record wins, and the duplicate suggestion is evicted.
+
+Operational Hour Isolation: Events must respect cached time limits. Meals cannot land before opening hours (e.g., Soma cannot be at 8:19 AM if it opens at 9:00 AM).
+
+Strict Category Constraints:
+
+Outdoor Parks/Nature/Hikes: Must conclude operations by 6:00 PM (preventing late-night trail walking).
+
+Experiences/Guided Tours: Must conclude operations by 6:30 PM.
+
+Nightlife/Bars: Enforced time-floors prevent them from slotting into morning hours.
+
+UX Responsiveness: Full-screen blocking spinners are exclusive to the master Generate action. Minor adjustments (drag-and-drop reordering, travel time fetching via directionsLoading) use per-day indicators and non-blocking background states.
+
+Map Pool Separation:
+
+My Map / My Places: Displays only manual user selections (source === 'manual').
+
+Plan Map: Dynamically tracks only active generated itinerary steps for the selected day.
+
+🚀 Recent Session Accomplishments & Engineering Fixes
+1. Architectural Overhauls & Scheduling Passes
+Two-Pass Pipeline Sync: To prevent travel calculations from accidentally overwriting opening-hour layouts, the core execution engine now uses shared time verification (resolveMealArrivalMinutes and resolveVisitArrivalMinutes) across both the placement pass and the recompute/reschedule pathways (schedule-times.ts + reschedule-day.ts).
+
+Synchronous Enrichment: Integrated enrichPlacesOpeningHours into the live pipeline before reschedules map out. This guarantees operating hour data is pulled immediately before computing dates rather than lazily in the background.
+
+Sit-Down Separation: Introduced isSitDownRestaurant() to parse out and exclude tasting classes, tours, or markets from landing inside core breakfast/lunch/dinner structural slots.
+
+2. UI Features Launched
+Plan Map Day Filters: Selecting a day card now filters active plan pins specifically to that day’s routing.
+
+Trip Date Editing & Sync: Integrated a master trip editing sheet (trip-dates-dialog.tsx) to alter active dates, sync itinerary_days, and automatically purge out-of-range rows.
+
+Completion Flags: Implemented migration 006, adding an is_completed boolean toggle to itinerary_stops. Once checked, the system permanently filters that venue out of future suggestion top-ups.
+
+3. Edge-Case Bug Patches Resolved in Code
+The Sagrada/Park Güell Duplication: Fixed an exception where the manual-places algorithm skipped user entries if the suggestion pool had already grabbed that google_place_id. Added dedupeStopsPreferManual and evictSuggestedGoogleDuplicate to force manual retention.
+
+Tour Timing Flaws: Added regex word-boundary flags (\btours?\b) to isExperienceActivity to catch unclassified text descriptions like "BARKENO TOURS" and clip them at the 6:30 PM operational wall.
+
+Nightlife Engine Refusal: Patched a fallback error where resolveVisitArrivalMinutes returned null for late-night venues (e.g., Gatsby), which historically caused the recalculation engine to leave the arrival chain frozen at morning values (8:24 AM).
+
+🎨 Map Specifications & Hex Palette
+Base Canvas: Custom muted styling layers to maximize point contrasts.
+
+Hex Reference Library:
+| Category | Hex Code | Icon Profile |
+| :--- | :--- | :--- |
+| 🟣 Hotel | #7C3AED | Home base marker |
+| 🟤 Restaurant | #7B2D3B | Fork over plate-arc |
+| 🔵 Bar | #2563EB | Wine glass |
+| 💗 Nightlife | #DB2777 | High contrast pink (isolated from hotel purple) |
+| 🟡 Activity | #CA8A04 | Standard Activity Gold |
+| 🟢 Monument | #166534 | Heritage Green |
+| 🟠 Museum | #EA580C | Gallery Orange |
+
+📂 Core Code Directory (Consolidated)
+Scheduling Architecture (~/travel-planner/lib/itinerary/):
+  - smart-generate.ts           # Core layout brain (*Note: Webpack-recovered, contains // @ts-nocheck*)
+  - interest-scheduling.ts     # Interest-based structural balancing metrics
+  - manual-places.ts           # Ensures manual entries are anchored properly
+  - hours.ts                   # Master hour logic, weekday text parsers, & arrival constraints
+  - schedule-times.ts          # Core math layer for chaining travel distances & times
+  - reschedule-day.ts          # State mutations called post-drag/drop or top-up insertion
+  - fill-sparse.ts             # Midday gap-filling mechanics for sparse days
+  - enrich-places.ts           # Synchronous and background data population routines
+
+Interface Modules (~/travel-planner/components/):
+  - trip/trip-dashboard.tsx    # Master application layout tabs & view boundaries
+  - trip/itinerary-section.tsx # Drag-and-drop interactions & active schedule loops
+  - trip/trip-dates-dialog.tsx # Name, calendar date management, & safety sync utilities
+  - map/TripMap.tsx            # Main canvas map boundary control layer
+
+Verification Scripts:
+  - scripts/verify-handoff.mjs # Dedicated QA validation script for integration diagnostics
+📋 Actionable Backlog & Next Steps1. P0 Validation & Persistence Tasks[ ] Execute a Clean Master Regeneration: Open the app interface, steer to the Plan tab, verify interests, and press Generate Itinerary. This is mandatory to permanently write the recent code-side scheduling and nightlife floor fixes (like the Gatsby 8:24 AM anomaly) to the database.[ ] Targeted Spot Checks:Verify Soma never defaults to an early breakfast slot before its 9:00 AM opening window.Verify Gatsby maps correctly to its nighttime slot ($\ge \text{9:00 PM}$).Confirm all 15 manual places (including the core Sagrada Família entry and Park Güell) are present exactly once with zero suggestion copies.Confirm Jul 4 (Excursion Day) reflects the layout rule: Early Breakfast $\rightarrow$ 7:00 AM Montserrat Pickup $\rightarrow$ Late Destination Lunch $\rightarrow$ Afternoon Activity $\rightarrow$ Dinner near hotel.[ ] Work Environment Backup: Initialize a clean git tree and commit the directory structure (git add . && git commit), specifically locking down smart-generate.ts to secure it against structural losses.2. Engineering & Technical Debt[ ] Typescript Refactoring: Strip out the // @ts-nocheck flag from smart-generate.ts and construct pristine interfaces to wipe out remaining bundle recovery artifact vulnerabilities.[ ] Live Service Key Verification: Insert a valid SUPABASE_SERVICE_ROLE_KEY into your local .env.local file to bypass RLS policies when launching the native testing utility (node scripts/verify-handoff.mjs).3. Feature Enhancements (Product Backlog)[ ] Vercel Infrastructure Target: Set up production hosting on Vercel using the steps outlined in SETUP.md and sync production environment variables.[ ] Full Edit-Place UI: Build capabilities to change a saved item's Name, Category, or Notes directly inside the Places tab (currently, only reservation fields are editable).[ ] Day-Isolated Sparse Logic Tuning: If days with late-night constraints (like the 8:45 PM Icebarcelona anchor on Jul 3) remain underpopulated, tune dayNeedsFill inside fill-sparse.ts to ensure its midday activity engine targets slots specifically bounded after lunch but preceding evening bookings.🚨 Emergency Operational RunbookIf your local developer server hangs, throws chunk errors, or ports clash from rogue underlying systems, execute this recovery sequence:
+# Force kill hanging background server processes
+pkill -f "next dev"
+pkill -f "next-server"
+
+# Purge local webpack build caches
+rm -rf .next
+
+# Identify asset paths holding port 3000
+lsof -i :3000
+
+# Relaunch developer environment cleanly
+cd ~/travel-planner && npm run dev
+If Safari outputs canvas errors post-restart, perform a hard refresh (⌘ + Shift + R) or load http://localhost:3000/login in an isolated Private Window to completely flush conflicting service worker states.
+
+# Voyage — Session Handoff / Cursor Context
+
+## Cursor context rules for this project
+
+Cursor’s context percentage fills up quickly because it may include chat history, referenced files, codebase search results, rules, terminal output, file reads, and agent tool calls. Do not assume Cursor remembers the full project perfectly once the context gets high.
+
+Important:
+
+* High context usage does **not** mean the codebase is gone.
+* It means the current AI chat is running out of working memory.
+* When context fills, Cursor may summarize prior context, and that summary can lose details.
+* Treat long chats as unreliable after heavy code edits, repeated debugging, or broad codebase scans.
+* Prefer clean, task-specific chats with this file referenced as the source of truth.
+
+Working rules:
+
+* Before making changes, identify the smallest set of files needed.
+* Do not scan the whole codebase unless necessary.
+* Do not rely on stale chat memory if this handoff contradicts it.
+* Reference specific files instead of using broad `@Codebase` searches whenever possible.
+* Keep edits narrow and verify behavior against the acceptance criteria below.
+* If context usage gets high, summarize current decisions, changed files, remaining bugs, and next steps, then continue in a new chat.
+* Do not commit or push unless the user explicitly asks.
+
+---
+
+# Voyage — Session Handoff
+
+## Current task
+
+Fix itinerary time scheduling and mandatory day rhythm for the Barcelona test trip.
+
+The planner must enforce this rhythm every day:
+
+**breakfast → 1–2 morning activities → lunch → 1–2 afternoon activities → dinner → nightlife**
+
+Additional requirements:
+
+* Meals must respect opening hours.
+* No breakfast at 8:19 AM if the restaurant opens at 9:00 AM.
+* Reservation anchors are sacred.
+* Example: Casa Batlló at 8:30 AM must stay at 8:30 AM.
+* If breakfast cannot fit before a morning reservation, schedule brunch after the visit.
+* Every trip day gets breakfast, lunch, and dinner.
+* This applies to all 12 Barcelona days, not just Jul 1–6.
+
+Status:
+
+* Code changes are in the workspace.
+* User has not confirmed a successful regenerate after the latest `ensure-meals.ts` work.
+* Treat the DB itinerary as stale until regenerated.
+
+---
+
+## Project context
+
+| Item               | Value                                                                            |
+| ------------------ | -------------------------------------------------------------------------------- |
+| App                | `~/travel-planner` / Voyage                                                      |
+| Stack              | Next.js 15 · Supabase · Google Maps/Places · Tailwind                            |
+| Test trip          | Barcelona 2026 · Jul 1–12                                                        |
+| Trip length        | 12 days                                                                          |
+| Trip ID            | `8ed96750-9eaa-4f81-9967-72da883cae74`                                           |
+| Dev command        | `npm run dev`                                                                    |
+| Dev URL            | `http://localhost:3000`                                                          |
+| Git                | Initialized, no commits yet                                                      |
+| Prior context file | `~/Library/Mobile Documents/com~apple~TextEdit/Documents/PROJECT_CONTEXT.md.txt` |
+
+---
+
+## What the user reported
+
+| Issue                              | Example                                                           |
+| ---------------------------------- | ----------------------------------------------------------------- |
+| Breakfast before open              | Jul 1: Brunch & Cake at 8:19 AM, opens 9:00 AM                    |
+| Impossible breakfast + reservation | Jul 2: breakfast 8:20 + Casa Batlló 8:30                          |
+| Wrong day order                    | Jul 3: Gatsby nightlife first, no breakfast                       |
+| Missing meals                      | Jul 4–5: no food at all                                           |
+| Sparse days + missing labels       | Jul 6: only Cañete + 1 activity; no Breakfast/Lunch/Dinner badges |
+| Scope                              | Problems continued across all days — fixes must be trip-wide      |
+
+---
+
+## Key decisions — do not regress
+
+1. Day rhythm is mandatory.
+
+   * Sort and chain stops by phase.
+   * Do not rely on raw clock order or stale `sort_order`.
+
+2. Reservation times are anchors.
+
+   * Never travel-chain over reservation times.
+   * Reserved attractions/restaurants must keep their sacred time.
+
+3. Breakfast must respect opening hours.
+
+   * Default breakfast floor is 9:00 AM when opening hours are unknown.
+   * Implemented through `getMealEarliestMinutes`.
+
+4. Breakfast can become brunch.
+
+   * If no early-open breakfast fits before a morning anchor like Casa Batlló, schedule brunch after the visit, around 10:15 AM or later.
+
+5. Three meals every day.
+
+   * `ensureTripMeals` is the safety net after generation.
+   * It must loop through all `itinerary_days`.
+
+6. Reserved restaurants need meal labels.
+
+   * Example: Cañete at noon should have `meal_type: lunch`.
+   * UI should show a badge when `meal_type` is set, not only when `stop_type === "meal"`.
+
+7. Two-pass timing matters.
+
+   * Placement fixes must also hit `recomputeScheduleTimes` / `rescheduleStopsFromOrder`.
+
+8. Regenerate is required.
+
+   * Existing `itinerary_stops` are not automatically migrated.
+   * The current DB itinerary should be considered stale until a full rebuild/regenerate runs.
+
+---
+
+## Work completed
+
+### Session 1 — scheduling foundation
+
+* `day-rhythm.ts`
+
+  * Phase ranking and rhythm sort:
+    breakfast → morning activities → lunch → afternoon activities → dinner → nightlife.
+
+* `schedule-times.ts` / `reschedule-day.ts`
+
+  * Rhythm-ordered recompute.
+  * Meal caps before next anchor.
+
+* `apply-reschedule.ts`
+
+  * Updates `sort_order` after reschedule to match rhythm.
+
+* `smart-generate.ts`
+
+  * `finalizeDayTimes` uses rhythm sort.
+  * `ensureRequiredMeals` / `topUpSparseDay` fixes.
+
+* `fill-sparse.ts`
+
+  * Merges stops by rhythm.
+
+* `hours.ts`
+
+  * `resolveMealArrivalMinutes` opening-hours handling.
+  * Latest-start cap.
+
+### Session 2 — latest meal fixes
+
+* `ensure-meals.ts` — new file.
+
+  * `ensureTripMeals()`.
+  * Tags reserved restaurants with `meal_type`.
+  * Inserts missing breakfast/lunch/dinner via Google.
+  * Re-sorts and reschedules each day.
+
+* `hours.ts`
+
+  * Added `getMealEarliestMinutes()`.
+  * Breakfast minimum is 9:00 AM when hours are unknown.
+
+* `smart-generate.ts`
+
+  * `collectMealCandidates()`.
+  * `addMeal()` tries multiple restaurants.
+  * `addBreakfastAfterMorningAnchor()`.
+  * Reserved restaurants inserted as `stop_type: meal` when appropriate.
+
+* `generate/route.ts` and `fill-sparse-days/route.ts`
+
+  * Call `ensureTripMeals` after enrich and before final reschedule.
+
+* `itinerary-section.tsx`
+
+  * Meal badge shows for any stop with `meal_type`.
+
+---
+
+## Relevant files
+
+| Area                             | Path                                          |
+| -------------------------------- | --------------------------------------------- |
+| Day rhythm / phase sort          | `lib/itinerary/day-rhythm.ts`                 |
+| Meal guarantee safety net        | `lib/itinerary/ensure-meals.ts`               |
+| Opening hours + meal floors      | `lib/itinerary/hours.ts`                      |
+| Time chaining                    | `lib/itinerary/schedule-times.ts`             |
+| Reschedule + sort order fix      | `lib/itinerary/reschedule-day.ts`             |
+| Reschedule application           | `lib/itinerary/apply-reschedule.ts`           |
+| Main scheduler                   | `lib/itinerary/smart-generate.ts`             |
+| Sparse-day top-up                | `lib/itinerary/fill-sparse.ts`                |
+| Generate API pipeline            | `app/api/itinerary/generate/route.ts`         |
+| Page-load fill                   | `app/api/itinerary/fill-sparse-days/route.ts` |
+| Plan UI + meal badges            | `components/trip/itinerary-section.tsx`       |
+| Meal window / missing-meal logic | `lib/itinerary/meal-locations.ts`             |
+| Hours enrich before reschedule   | `lib/itinerary/enrich-places.ts`              |
+
+Note:
+
+* `smart-generate.ts` has `@ts-nocheck`.
+* Treat it as fragile.
+* Avoid unnecessary broad rewrites.
+
+---
+
+## Generate pipeline order
+
+Current intended order:
+
+```text
+generateSmartItinerary
+→ insert stops
+→ fillSparseDaysForTrip
+→ enrichPlacesOpeningHours
+→ ensureTripMeals
+→ enrichPlacesOpeningHours for newly added meal places
+→ rescheduleAllItineraryDaysForTrip
+```
+
+`ensureTripMeals` is the new safety net and must stay before final reschedule.
+
+---
+
+## Bugs found and root causes
+
+| Bug                              | Root cause                                                                                  | Fix status                                                             |
+| -------------------------------- | ------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------- |
+| Breakfast at 8:19 AM             | Target start + travel + restaurant default earliest 8 AM; hours often null at schedule time | Fixed in code through `getMealEarliestMinutes` and `addMeal` time math |
+| Casa Batlló + breakfast conflict | Anchor not capping prior meal; early breakfast failed silently                              | Fixed with anchor cap and `addBreakfastAfterMorningAnchor`             |
+| Jul 3 nightlife first            | `sort_order` did not match chronological rhythm after reschedule                            | Fixed with rhythm sort order updates in reschedule                     |
+| Days with no food                | `addMeal` failed on first candidate; no trip-wide guarantee                                 | Fixed with `ensureTripMeals`                                           |
+| Missing Lunch/Breakfast labels   | UI required `stop_type === "meal"`; Cañete was a place only                                 | Fixed with `meal_type` on reserved restaurants and UI badge            |
+| Jul 1–6 only mentioned in QA     | Examples only; code must loop all dates / all days                                          | Confirmed trip-wide requirement                                        |
+
+---
+
+## Constraints
+
+* Do not commit or push unless user explicitly asks.
+* Existing itinerary data is stale until regenerated.
+* Migration 006 for `is_completed` was applied in prior sessions.
+* `SUPABASE_SERVICE_ROLE_KEY` is optional.
+* `node scripts/verify-handoff.mjs` skips data checks without it.
+* Dev server may need a clean restart:
+
+```bash
+pkill -f "next dev"
+rm -rf .next
+npm run dev
+```
+
+---
+
+## Exact next steps
+
+1. Start dev server:
+
+```bash
+cd ~/travel-planner
+npm run dev
+```
+
+2. Log in.
+3. Open the Barcelona trip.
+4. Go to the Plan tab.
+5. Generate itinerary with a full rebuild.
+
+   * Expected runtime: approximately 30–60 seconds.
+6. Spot-check all 12 days: Jul 1–12.
+
+---
+
+## Acceptance criteria
+
+| Check     | Pass criteria                                                                          |
+| --------- | -------------------------------------------------------------------------------------- |
+| Every day | Breakfast + lunch + dinner present, either as meal stops or tagged reservations        |
+| Jul 1     | Breakfast is at or after 9:00 AM                                                       |
+| Jul 2     | Casa Batlló stays anchored at 8:30 AM                                                  |
+| Jul 2     | If no early breakfast fits, brunch appears after Casa Batlló, around 10:15 AM or later |
+| Jul 3+    | Rhythm order is breakfast → sights → lunch → sights → dinner → bars/nightlife          |
+| Jul 6     | Cañete shows Lunch badge                                                               |
+| Jul 6     | Breakfast and dinner are also present                                                  |
+| Times     | No overlaps                                                                            |
+| Times     | Stay duration + travel time fits before the next stop                                  |
+| Scope     | All 12 days pass, not only Jul 1–6                                                     |
+
+---
+
+## If a day still fails
+
+Note:
+
+* Day number/date.
+* Missing meal or wrong meal.
+* Bad time.
+* Bad order.
+* Whether the stop has `meal_type`.
+* Whether the issue appears before or after regenerate.
+
+Then trace in this order:
+
+1. Did `ensureTripMeals` run?
+2. Did the API fail while searching Google meal places?
+3. Does `place.opening_hours` exist in Supabase for that meal venue?
+4. Did `getMealEarliestMinutes` correctly apply breakfast floor?
+5. Did `rescheduleStopsFromOrder` output the correct order?
+6. Did `sort_order` get updated after rhythm reschedule?
+7. Did the UI badge logic check `meal_type`, not only `stop_type === "meal"`?
+
+Optional verification:
+
+```bash
+node scripts/verify-handoff.mjs
+```
+
+For better verification, add `SUPABASE_SERVICE_ROLE_KEY` to `.env.local`.
+
+---
+
+## Good opening line for next Cursor chat
+
+Use one of these:
+
+“Regenerated Barcelona — Jul X still missing dinner / breakfast before 9 AM / wrong order on Jul Y.”
+
+or:
+
+“All 12 days look good — let’s commit / deploy / tune parks pool.”
+
+---
+
+## Design principles from full project history
+
+* Manual places where `source = 'manual'` must appear exactly once per trip.
+* My Map = manual places only.
+* Plan map = itinerary stops.
+* Plan map should day-filter on click.
+* Suggested places stay out of My Places unless the user saves them manually.
+* Full-screen spinner only on Generate.
+* Drag uses per-day spinner.
+* Interest buckets drive scheduling.
+* There are 8 interests.
+* At least 3 interests are required.

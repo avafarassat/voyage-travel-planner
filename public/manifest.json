@@ -1,0 +1,18 @@
+{
+  "name": "Voyage — Travel Planner",
+  "short_name": "Voyage",
+  "description": "Plan trips with flights, hotels, restaurants, and daily itineraries on an interactive map.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#faf9f7",
+  "theme_color": "#6366f1",
+  "orientation": "portrait-primary",
+  "icons": [
+    {
+      "src": "/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

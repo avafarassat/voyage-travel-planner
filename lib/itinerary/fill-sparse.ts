@@ -1,0 +1,855 @@
+import type { SupabaseClient } from "@supabase/supabase-js";
+import { createEstimateTravelTimeFn } from "@/lib/itinerary/travel";
+import {
+  fetchAlternativeSuggestion,
+  fetchExperiencesPool,
+  fetchMealSuggestion,
+  fetchParksAndNaturePool,
+  fetchTopSuggestions,
+} from "@/lib/itinerary/google-places";
+import { rescheduleItineraryDay } from "@/lib/itinerary/apply-reschedule";
+import { getDefaultVisitMinutes, MEAL_WINDOWS, minutesToTimeString, resolveMealArrivalMinutes, resolveVisitArrivalMinutes, type OpeningHours } from "@/lib/itinerary/hours";
+import { parseDayBounds, parseTimeToMinutes } from "@/lib/itinerary/reschedule-day";
+import { compareStopsByDayRhythm } from "@/lib/itinerary/day-rhythm";
+import { placeTheme, themeAllowed } from "@/lib/itinerary/place-theme";
+import {
+  dayMissingMeals,
+  getActivityLocations,
+  getMealSearchLocation,
+  isExcursionDay,
+} from "@/lib/itinerary/meal-locations";
+import type { Place, TripInterest } from "@/lib/types";
+import { isExperienceActivity, isParkOrNaturePlace } from "@/lib/types";
+import {
+  candidateMatchesInterest,
+  initTripInterestCounts,
+  interestsMatchedByCandidate,
+  rankActivityInterests,
+  registerInterestHits,
+} from "@/lib/itinerary/interest-scheduling";
+import {
+  getGooglePlaceIdsOnDay,
+  isPlaceAlreadyOnDay,
+} from "@/lib/itinerary/day-place-usage";
+import { getSuggestionExcludeGoogleIds } from "@/lib/itinerary/suggestion-exclusions";
+import {
+  isRestaurantBrandUsed,
+  registerRestaurantBrand,
+} from "@/lib/itinerary/meal-dedup";
+import {
+  earliestMealStart,
+  mealInsertionBounds,
+  MEAL_ACTIVITY_GAP,
+  presentMealSlots,
+  resolveMealStartMinutes,
+  type MealSlotStop,
+} from "@/lib/itinerary/meal-slots";
+
+type StopRow = {
+  id: string;
+  itinerary_day_id: string;
+  sort_order: number;
+  stop_type: string;
+  meal_type: string | null;
+  scheduled_time: string | null;
+  duration_minutes: number | null;
+  is_suggested: boolean;
+  is_completed: boolean;
+  place_id: string | null;
+  place?: Place | Place[] | null;
+};
+
+function normalizePlace(stop: StopRow): Place | null {
+  if (!stop.place) return null;
+  return Array.isArray(stop.place) ? stop.place[0] : stop.place;
+}
+
+function normalizeStopPlace(stop: StopRow) {
+  const place = normalizePlace(stop);
+  return {
+    is_completed: stop.is_completed ?? false,
+    place_id: stop.place_id,
+    place,
+  };
+}
+
+const SIGHTSEEING_CATEGORIES = new Set(["monument", "museum", "activity"]);
+
+function countSightseeingStops(stops: StopRow[]): number {
+  return stops.filter((s) => {
+    if (s.meal_type) return false;
+    const p = normalizePlace(s);
+    return p?.category != null && SIGHTSEEING_CATEGORIES.has(p.category);
+  }).length;
+}
+
+function hasSightseeingBetweenBreakfastAndLunch(stops: StopRow[]): boolean {
+  const sorted = [...stops].sort((a, b) =>
+    compareStopsByDayRhythm(
+      {
+        stop_type: a.stop_type,
+        meal_type: a.meal_type,
+        scheduled_time: a.scheduled_time,
+        place: normalizePlace(a),
+      },
+      {
+        stop_type: b.stop_type,
+        meal_type: b.meal_type,
+        scheduled_time: b.scheduled_time,
+        place: normalizePlace(b),
+      }
+    )
+  );
+  const breakfastIdx = sorted.findIndex((s) => s.meal_type === "breakfast");
+  const lunchIdx = sorted.findIndex((s) => s.meal_type === "lunch");
+  if (breakfastIdx < 0 || lunchIdx < 0 || lunchIdx <= breakfastIdx + 1) {
+    return breakfastIdx < 0 || lunchIdx < 0;
+  }
+  return sorted.slice(breakfastIdx + 1, lunchIdx).some((s) => {
+    const p = normalizePlace(s);
+    return p?.category != null && SIGHTSEEING_CATEGORIES.has(p.category);
+  });
+}
+
+function dayIsSparse(stops: StopRow[], options?: { excursionDay?: boolean }): boolean {
+  const minStops = options?.excursionDay ? 4 : 5;
+  if (stops.length < minStops) return true;
+  if (countSightseeingStops(stops) < 2) return true;
+  if (!hasSightseeingBetweenBreakfastAndLunch(stops)) return true;
+  const hasBreakfast = stops.some((s) => s.meal_type === "breakfast");
+  const hasLunch = stops.some((s) => s.meal_type === "lunch");
+  const hasDinner = stops.some((s) => s.meal_type === "dinner");
+  if (!hasBreakfast || !hasLunch || !hasDinner) return true;
+  const first = stops.find((s) => s.scheduled_time);
+  if (first?.scheduled_time && parseTimeToMinutes(first.scheduled_time) > MEAL_WINDOWS.breakfast.end) {
+    return true;
+  }
+  const last = stops[stops.length - 1];
+  if (!last?.scheduled_time) return true;
+  const lastEnd =
+    parseTimeToMinutes(last.scheduled_time) + (last.duration_minutes ?? 60);
+  return lastEnd < MEAL_WINDOWS.dinner.start + 60;
+}
+
+function stopsForMealCheck(stops: StopRow[]) {
+  return stops.map((s) => {
+    const place = normalizePlace(s);
+    return {
+      meal_type: s.meal_type,
+      stop_type: s.stop_type,
+      scheduled_time: s.scheduled_time,
+      place: place
+        ? {
+            category: place.category,
+            reservation_time: place.reservation_time,
+          }
+        : null,
+    };
+  });
+}
+
+function dayNeedsFill(stops: StopRow[], options?: { excursionDay?: boolean }): boolean {
+  if (dayMissingMeals(stopsForMealCheck(stops)).length > 0) return true;
+  return dayIsSparse(stops, options);
+}
+
+function getDayActivityWindow(
+  sortedStops: StopRow[],
+  dayEndMinutes: number
+): { start: number; end: number } {
+  const breakfast = sortedStops.find((s) => s.meal_type === "breakfast");
+  const lunch = sortedStops.find((s) => s.meal_type === "lunch");
+
+  let start = breakfast?.scheduled_time
+    ? parseTimeToMinutes(breakfast.scheduled_time) +
+      (breakfast.duration_minutes ?? MEAL_WINDOWS.breakfast.duration) +
+      15
+    : MEAL_WINDOWS.lunch.start;
+
+  if (lunch?.scheduled_time) {
+    start = Math.max(
+      start,
+      parseTimeToMinutes(lunch.scheduled_time) +
+        (lunch.duration_minutes ?? MEAL_WINDOWS.lunch.duration) +
+        15
+    );
+  } else {
+    start = Math.max(start, MEAL_WINDOWS.lunch.end);
+  }
+
+  const eveningReserved = sortedStops
+    .map((s) => normalizePlace(s))
+    .filter((p) => p?.reservation_time)
+    .map((p) => parseTimeToMinutes(p!.reservation_time!))
+    .filter((t) => t >= MEAL_WINDOWS.lunch.end);
+
+  let end = eveningReserved.length
+    ? Math.min(...eveningReserved) - 15
+    : MEAL_WINDOWS.dinner.start - 15;
+  end = Math.min(end, dayEndMinutes - 30);
+
+  return { start, end: Math.max(end, start + 45) };
+}
+
+async function resolveMealPlace(
+  supabase: SupabaseClient,
+  tripId: string,
+  meal: "breakfast" | "lunch" | "dinner",
+  location: { lat: number; lng: number },
+  city: string,
+  usedGoogleIds: Set<string>,
+  usedMealBrands: Set<string>,
+  apiKey: string,
+  date: string
+): Promise<{ placeId: string; googlePlaceId: string; openingHours?: OpeningHours | null } | null> {
+  const mealResult = await fetchMealSuggestion(
+    location.lat,
+    location.lng,
+    city,
+    meal,
+    [...usedGoogleIds],
+    apiKey,
+    [...usedMealBrands]
+  );
+  const candidate = mealResult
+    ? mealResult
+    : await fetchAlternativeSuggestion(
+        location.lat,
+        location.lng,
+        city,
+        "restaurant",
+        [...usedGoogleIds],
+        apiKey,
+        [...usedMealBrands]
+      );
+
+  if (
+    !candidate ||
+    isRestaurantBrandUsed(candidate.name, usedMealBrands)
+  ) {
+    return null;
+  }
+
+  const persisted = await persistMealCandidate(supabase, tripId, candidate, usedGoogleIds);
+  if (!persisted) return null;
+  registerRestaurantBrand(candidate.name, usedMealBrands);
+  return { ...persisted, openingHours: candidate.openingHours ?? null };
+}
+
+async function persistMealCandidate(
+  supabase: SupabaseClient,
+  tripId: string,
+  candidate: {
+    placeId: string;
+    name: string;
+    address: string;
+    lat: number;
+    lng: number;
+    rating?: number;
+    photoUrl?: string;
+    openingHours?: OpeningHours | null;
+  },
+  usedGoogleIds: Set<string>
+): Promise<{ placeId: string; googlePlaceId: string } | null> {
+  usedGoogleIds.add(candidate.placeId);
+
+  const { data: existing } = await supabase
+    .from("places")
+    .select("id")
+    .eq("trip_id", tripId)
+    .eq("google_place_id", candidate.placeId)
+    .maybeSingle();
+
+  if (existing) {
+    if (candidate.openingHours) {
+      await supabase
+        .from("places")
+        .update({ opening_hours: candidate.openingHours })
+        .eq("id", existing.id);
+    }
+    return { placeId: existing.id, googlePlaceId: candidate.placeId };
+  }
+
+  const { data: newPlace } = await supabase
+    .from("places")
+    .insert({
+      trip_id: tripId,
+      name: candidate.name,
+      category: "restaurant",
+      address: candidate.address,
+      lat: candidate.lat,
+      lng: candidate.lng,
+      source: "suggested",
+      google_place_id: candidate.placeId,
+      rating: candidate.rating ?? null,
+      photo_url: candidate.photoUrl ?? null,
+      opening_hours: candidate.openingHours ?? null,
+    })
+    .select("id")
+    .single();
+
+  if (!newPlace) return null;
+  return { placeId: newPlace.id, googlePlaceId: candidate.placeId };
+}
+
+export async function fillSparseDaysForTrip(
+  supabase: SupabaseClient,
+  tripId: string,
+  apiKey: string
+): Promise<number> {
+  const { data: trip } = await supabase
+    .from("trips")
+    .select("*")
+    .eq("id", tripId)
+    .single();
+
+  if (!trip) return 0;
+
+  const [{ data: hotel }, { data: placesRaw }, { data: days }] = await Promise.all([
+    supabase.from("hotels").select("*").eq("trip_id", tripId).maybeSingle(),
+    supabase.from("places").select("*").eq("trip_id", tripId),
+    supabase
+      .from("itinerary_days")
+      .select("id, day_number, date")
+      .eq("trip_id", tripId)
+      .order("day_number"),
+  ]);
+
+  if (!hotel || !days?.length) return 0;
+
+  const places = (placesRaw ?? []) as Place[];
+  const { dayEndMinutes, dayStartMinutes } = parseDayBounds(
+    trip.day_start_time,
+    trip.day_end_time
+  );
+  const interests = (trip.interests ?? []) as TripInterest[];
+
+  const { data: allStops } = await supabase
+    .from("itinerary_stops")
+    .select("*, place:places(*)")
+    .in(
+      "itinerary_day_id",
+      days.map((d) => d.id)
+    )
+    .order("sort_order");
+
+  const stopsByDay = new Map<string, StopRow[]>();
+  for (const day of days) stopsByDay.set(day.id, []);
+  for (const stop of (allStops ?? []) as StopRow[]) {
+    stopsByDay.get(stop.itinerary_day_id)?.push(stop);
+  }
+
+  const usedGoogleIds = new Set(
+    getSuggestionExcludeGoogleIds(
+      places,
+      (allStops ?? []).map((row) => {
+        const place = normalizePlace(row);
+        return { is_completed: row.is_completed ?? false, place };
+      })
+    )
+  );
+  const usedMealBrands = new Set<string>();
+  for (const row of allStops ?? []) {
+    const place = normalizePlace(row as StopRow);
+    if (place?.category === "restaurant" || (row as StopRow).meal_type) {
+      registerRestaurantBrand(place.name, usedMealBrands);
+    }
+  }
+
+  const [interestPool, parksPool, experiencesPool] = await Promise.all([
+    fetchTopSuggestions(
+      hotel.lat,
+      hotel.lng,
+      trip.city,
+      interests,
+      [...usedGoogleIds],
+      apiKey,
+      60
+    ),
+    fetchParksAndNaturePool(
+      hotel.lat,
+      hotel.lng,
+      trip.city,
+      [...usedGoogleIds],
+      apiKey,
+      35
+    ),
+    fetchExperiencesPool(
+      hotel.lat,
+      hotel.lng,
+      trip.city,
+      [...usedGoogleIds],
+      apiKey,
+      25
+    ),
+  ]);
+
+  const poolSeen = new Set(usedGoogleIds);
+  const suggestionPool = [...parksPool, ...experiencesPool];
+  for (const place of interestPool) {
+    if (poolSeen.has(place.placeId)) continue;
+    poolSeen.add(place.placeId);
+    suggestionPool.push(place);
+  }
+
+  const travelTime = createEstimateTravelTimeFn();
+  const tripInterestCounts = initTripInterestCounts(interests);
+  let filledDays = 0;
+
+  const tripWideDuplicateStopIds: string[] = [];
+  const seenGoogleTrip = new Map<string, { stopId: string; manual: boolean }>();
+  for (const day of days) {
+    for (const stop of stopsByDay.get(day.id) ?? []) {
+      const p = normalizePlace(stop);
+      const gid = p?.google_place_id;
+      if (!gid) continue;
+      const isManual = p?.source === "manual";
+      const existing = seenGoogleTrip.get(gid);
+      if (!existing) {
+        seenGoogleTrip.set(gid, { stopId: stop.id, manual: isManual });
+      } else if (isManual && !existing.manual) {
+        tripWideDuplicateStopIds.push(existing.stopId);
+        seenGoogleTrip.set(gid, { stopId: stop.id, manual: true });
+      } else {
+        tripWideDuplicateStopIds.push(stop.id);
+      }
+    }
+  }
+  if (tripWideDuplicateStopIds.length > 0) {
+    await supabase.from("itinerary_stops").delete().in("id", tripWideDuplicateStopIds);
+    for (const day of days) {
+      const dayStops = (stopsByDay.get(day.id) ?? []).filter(
+        (s) => !tripWideDuplicateStopIds.includes(s.id)
+      );
+      stopsByDay.set(day.id, dayStops);
+    }
+  }
+
+  for (const day of days) {
+    let dayStops = stopsByDay.get(day.id) ?? [];
+
+    const duplicateStopIds: string[] = [];
+    const seenGoogleOnDay = new Set<string>();
+    const seenPlaceIds = new Set<string>();
+    for (const stop of dayStops) {
+      const p = normalizePlace(stop);
+      const gid = p?.google_place_id;
+      if (gid) {
+        if (seenGoogleOnDay.has(gid)) {
+          duplicateStopIds.push(stop.id);
+          continue;
+        }
+        seenGoogleOnDay.add(gid);
+      }
+      if (!stop.place_id) continue;
+      if (seenPlaceIds.has(stop.place_id)) {
+        duplicateStopIds.push(stop.id);
+      } else {
+        seenPlaceIds.add(stop.place_id);
+      }
+    }
+    if (duplicateStopIds.length > 0) {
+      await supabase.from("itinerary_stops").delete().in("id", duplicateStopIds);
+      dayStops = dayStops.filter((s) => !duplicateStopIds.includes(s.id));
+      stopsByDay.set(day.id, dayStops);
+    }
+
+    const hasRestRemainder = dayStops.some(
+      (s) => s.stop_type === "rest" && (s.duration_minutes ?? 0) >= 180
+    );
+    if (hasRestRemainder) continue;
+
+    const activityLocs = getActivityLocations(
+      dayStops.map((s) => ({
+        stop_type: s.stop_type,
+        meal_type: s.meal_type,
+        place: normalizePlace(s),
+      }))
+    );
+    const excursionDay = isExcursionDay(
+      { lat: hotel.lat, lng: hotel.lng },
+      activityLocs
+    );
+
+    if (!dayNeedsFill(dayStops, { excursionDay })) continue;
+
+    const dayThemes = new Set<string>();
+    const dayInterests = new Set<TripInterest>();
+    for (const stop of dayStops) {
+      const p = normalizePlace(stop);
+      if (p?.name) {
+        dayThemes.add(placeTheme(p.name, p.category));
+        const hits = interestsMatchedByCandidate({
+          name: p.name,
+          category: p.category,
+        }).filter((interest) => interests.includes(interest));
+        for (const interest of hits) dayInterests.add(interest);
+      }
+      if (stop.meal_type) dayInterests.add("restaurants");
+    }
+
+    const toAdd: {
+      stop_type: string;
+      meal_type?: string;
+      duration_minutes: number;
+      scheduled_time: string;
+      is_suggested: boolean;
+      place_id?: string;
+    }[] = [];
+
+    const mealCheckStops = () => [
+      ...stopsForMealCheck(dayStops),
+      ...toAdd.map((s) => ({
+        meal_type: s.meal_type,
+        stop_type: s.stop_type,
+        scheduled_time: s.scheduled_time,
+        place: null,
+      })),
+    ];
+
+    const workingMealStops = (): MealSlotStop[] => [
+      ...dayStops.map((s) => ({
+        id: s.id,
+        meal_type: s.meal_type,
+        stop_type: s.stop_type,
+        scheduled_time: s.scheduled_time,
+        duration_minutes: s.duration_minutes,
+        place: normalizePlace(s),
+      })),
+      ...toAdd
+        .filter((s) => s.meal_type)
+        .map((s) => ({
+          meal_type: s.meal_type,
+          stop_type: s.stop_type,
+          scheduled_time: s.scheduled_time,
+          duration_minutes: s.duration_minutes,
+          place: { category: "restaurant" as const },
+        })),
+    ];
+
+    for (const meal of dayMissingMeals(mealCheckStops())) {
+      if (presentMealSlots(workingMealStops()).has(meal)) continue;
+
+      const window = MEAL_WINDOWS[meal];
+      const bounds = mealInsertionBounds(
+        meal,
+        workingMealStops(),
+        day.date,
+        { lat: hotel.lat, lng: hotel.lng }
+      );
+      if (!bounds) continue;
+
+      const searchAt = getMealSearchLocation(
+        meal,
+        { lat: hotel.lat, lng: hotel.lng },
+        activityLocs
+      );
+      const resolved = await resolveMealPlace(
+        supabase,
+        tripId,
+        meal,
+        searchAt,
+        trip.city,
+        usedGoogleIds,
+        usedMealBrands,
+        apiKey,
+        day.date
+      );
+      if (!resolved) continue;
+      if (isPlaceAlreadyOnDay([...dayStops.map(normalizeStopPlace), ...toAdd.map((s) => ({ place_id: s.place_id ?? null, place: null }))], resolved.placeId, resolved.googlePlaceId)) continue;
+
+      const lunchStart = earliestMealStart(workingMealStops(), "lunch");
+      let mealStart: number | null;
+      if (meal === "breakfast") {
+        mealStart = resolveMealStartMinutes(day.date, meal, resolved.openingHours, {
+          notBefore: bounds.notBefore,
+          notAfter: bounds.notAfter,
+          lunchStart,
+        });
+      } else {
+        mealStart = resolveMealArrivalMinutes(
+          day.date,
+          bounds.notBefore,
+          null,
+          meal,
+          window.duration,
+          resolved.openingHours,
+          { latestStart: bounds.notAfter, notBefore: bounds.notBefore }
+        );
+      }
+      if (mealStart == null) continue;
+
+      const lunchEndBoundary =
+        (lunchStart ?? MEAL_WINDOWS.lunch.start) - MEAL_ACTIVITY_GAP;
+      if (meal === "breakfast" && mealStart + window.duration > lunchEndBoundary) {
+        continue;
+      }
+
+      toAdd.push({
+        stop_type: "meal",
+        meal_type: meal,
+        duration_minutes: window.duration,
+        scheduled_time: minutesToTimeString(mealStart),
+        is_suggested: true,
+        place_id: resolved.placeId,
+      });
+    }
+
+    const sortedExisting = [...dayStops].sort((a, b) => {
+      const ta = a.scheduled_time ? parseTimeToMinutes(a.scheduled_time) : 9999;
+      const tb = b.scheduled_time ? parseTimeToMinutes(b.scheduled_time) : 9999;
+      return ta - tb;
+    });
+
+    const activityWindow = getDayActivityWindow(sortedExisting, dayEndMinutes);
+    let cursorMinutes = activityWindow.start;
+    let cursorLocation = { lat: hotel.lat, lng: hotel.lng };
+    const lunchStop = sortedExisting.find((s) => s.meal_type === "lunch");
+    const anchorStop =
+      lunchStop ??
+      sortedExisting.find((s) => s.meal_type === "breakfast") ??
+      [...sortedExisting].reverse().find((s) => normalizePlace(s));
+    const anchorPlace = anchorStop ? normalizePlace(anchorStop) : null;
+    if (anchorPlace) {
+      cursorLocation = { lat: anchorPlace.lat, lng: anchorPlace.lng };
+    }
+
+    let addedActivities = 0;
+    let sightseeingCount = countSightseeingStops(dayStops);
+    const minSightseeing = 2;
+    const targetStops = excursionDay ? 4 : 5;
+    const activityDeadline = Math.min(
+      excursionDay ? MEAL_WINDOWS.dinner.start : activityWindow.end,
+      activityWindow.end
+    );
+    const dayGoogleIds = () => {
+      const ids = getGooglePlaceIdsOnDay(dayStops.map(normalizeStopPlace));
+      for (const item of toAdd) {
+        if (!item.place_id) continue;
+        const googleId = places.find((p) => p.id === item.place_id)?.google_place_id;
+        if (googleId) ids.add(googleId);
+      }
+      return ids;
+    };
+
+    while (
+      addedActivities < 3 &&
+      (sightseeingCount < minSightseeing ||
+        dayStops.length + toAdd.length < targetStops) &&
+      cursorMinutes + 45 < activityDeadline
+    ) {
+      const rankedInterests = rankActivityInterests(
+        interests,
+        dayInterests,
+        tripInterestCounts,
+        addedActivities
+      );
+
+      let candidate =
+        rankedInterests
+          .map((interest) =>
+            suggestionPool.find(
+              (s) =>
+                !usedGoogleIds.has(s.placeId) &&
+                !dayGoogleIds().has(s.placeId) &&
+                candidateMatchesInterest(
+                  {
+                    name: s.name,
+                    category: s.category ?? "activity",
+                    outdoor: isParkOrNaturePlace(s.types ?? [], s.name),
+                    experience: isExperienceActivity(s.types ?? [], s.name),
+                  },
+                  interest
+                ) &&
+                themeAllowed(dayThemes, s.name, s.category ?? "activity")
+            )
+          )
+          .find(Boolean) ?? null;
+
+      if (!candidate) {
+        candidate =
+          suggestionPool.find(
+            (s) =>
+              !usedGoogleIds.has(s.placeId) &&
+              !dayGoogleIds().has(s.placeId) &&
+              themeAllowed(dayThemes, s.name, s.category ?? "activity")
+          ) ?? null;
+      }
+      if (!candidate) break;
+      if (dayGoogleIds().has(candidate.placeId)) break;
+
+      const category = candidate.category ?? "activity";
+      const outdoor = isParkOrNaturePlace(candidate.types ?? [], candidate.name);
+      const experience = isExperienceActivity(candidate.types ?? [], candidate.name);
+      const duration = getDefaultVisitMinutes(category);
+
+      const travel = await travelTime(cursorLocation, {
+        lat: candidate.lat,
+        lng: candidate.lng,
+      });
+      const travelStart = cursorMinutes + travel;
+      const resolved = resolveVisitArrivalMinutes(
+        day.date,
+        Math.max(travelStart, activityWindow.start),
+        category,
+        duration,
+        candidate.openingHours,
+        { outdoor, experience }
+      );
+      if (resolved == null) {
+        usedGoogleIds.add(candidate.placeId);
+        continue;
+      }
+      if (resolved + duration > activityDeadline) break;
+
+      usedGoogleIds.add(candidate.placeId);
+      dayThemes.add(placeTheme(candidate.name, candidate.category ?? "activity"));
+      const interestHits = interestsMatchedByCandidate({
+        name: candidate.name,
+        category: candidate.category ?? "activity",
+        outdoor: isParkOrNaturePlace(candidate.types ?? [], candidate.name),
+        experience: isExperienceActivity(candidate.types ?? [], candidate.name),
+      }).filter((interest) => interests.includes(interest));
+      registerInterestHits(tripInterestCounts, dayInterests, interestHits);
+
+      const { data: existing } = await supabase
+        .from("places")
+        .select("id")
+        .eq("trip_id", tripId)
+        .eq("google_place_id", candidate.placeId)
+        .maybeSingle();
+
+      let placeId = existing?.id;
+      if (!placeId) {
+        const { data: newPlace } = await supabase
+          .from("places")
+          .insert({
+            trip_id: tripId,
+            name: candidate.name,
+            category: candidate.category ?? "activity",
+            address: candidate.address,
+            lat: candidate.lat,
+            lng: candidate.lng,
+            source: "suggested",
+            google_place_id: candidate.placeId,
+            rating: candidate.rating ?? null,
+            photo_url: candidate.photoUrl ?? null,
+            opening_hours: candidate.openingHours ?? null,
+          })
+          .select("id")
+          .single();
+        placeId = newPlace?.id;
+      }
+
+      if (placeId) {
+        toAdd.push({
+          stop_type: "place",
+          duration_minutes: duration,
+          scheduled_time: minutesToTimeString(resolved),
+          is_suggested: true,
+          place_id: placeId,
+        });
+        cursorMinutes = resolved + duration;
+        cursorLocation = { lat: candidate.lat, lng: candidate.lng };
+        addedActivities++;
+        if (SIGHTSEEING_CATEGORIES.has(category)) {
+          sightseeingCount++;
+        }
+      }
+    }
+
+    if (toAdd.length === 0) continue;
+
+    const merged = [
+      ...dayStops.map((s) => ({
+        id: s.id,
+        sort_order: s.sort_order,
+        stop_type: s.stop_type,
+        meal_type: s.meal_type,
+        duration_minutes: s.duration_minutes,
+        scheduled_time: s.scheduled_time,
+        is_suggested: s.is_suggested,
+        place_id: s.place_id,
+        place: normalizePlace(s),
+        isNew: false as const,
+      })),
+      ...toAdd.map((s, i) => ({
+        id: `new-${i}`,
+        sort_order: dayStops.length + i,
+        stop_type: s.stop_type,
+        meal_type: s.meal_type ?? null,
+        duration_minutes: s.duration_minutes,
+        scheduled_time: s.scheduled_time,
+        is_suggested: s.is_suggested,
+        place_id: s.place_id ?? null,
+        place: null as Place | null,
+        isNew: true as const,
+      })),
+    ].sort((a, b) =>
+      compareStopsByDayRhythm(
+        {
+          stop_type: a.stop_type,
+          meal_type: a.meal_type,
+          scheduled_time: a.scheduled_time,
+          place: a.place
+            ? {
+                category: a.place.category,
+                reservation_time: a.place.reservation_time ?? null,
+              }
+            : null,
+        },
+        {
+          stop_type: b.stop_type,
+          meal_type: b.meal_type,
+          scheduled_time: b.scheduled_time,
+          place: b.place
+            ? {
+                category: b.place.category,
+                reservation_time: b.place.reservation_time ?? null,
+              }
+            : null,
+        }
+      )
+    );
+
+    const newStopIds: string[] = [];
+    for (const item of merged) {
+      if (!item.isNew) continue;
+      const { data: inserted } = await supabase
+        .from("itinerary_stops")
+        .insert({
+          itinerary_day_id: day.id,
+          place_id: item.place_id,
+          sort_order: 0,
+          stop_type: item.stop_type,
+          meal_type: item.meal_type,
+          duration_minutes: item.duration_minutes,
+          scheduled_time: item.scheduled_time,
+          is_suggested: item.is_suggested,
+        })
+        .select("id, stop_type, duration_minutes, place:places(lat, lng, category)")
+        .single();
+
+      if (inserted) {
+        newStopIds.push(inserted.id);
+        item.id = inserted.id;
+        const p = Array.isArray(inserted.place) ? inserted.place[0] : inserted.place;
+        item.place = p as Place | null;
+      }
+    }
+
+    const finalStops = merged.filter((s) => !s.isNew || newStopIds.includes(s.id));
+    for (let i = 0; i < finalStops.length; i++) {
+      await supabase
+        .from("itinerary_stops")
+        .update({ sort_order: i })
+        .eq("id", finalStops[i].id);
+    }
+
+    await rescheduleItineraryDay(supabase, day.id, day.date);
+
+    filledDays++;
+  }
+
+  return filledDays;
+}
