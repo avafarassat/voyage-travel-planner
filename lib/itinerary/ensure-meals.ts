@@ -4,18 +4,18 @@ import { isSitDownRestaurant } from "@/lib/types";
 import { rescheduleItineraryDay } from "@/lib/itinerary/apply-reschedule";
 import {
   fetchAlternativeSuggestion,
-  fetchMealSuggestion,
+  fetchMealSuggestionCandidates,
 } from "@/lib/itinerary/google-places";
 import {
   dayMissingMeals,
   getMealSearchLocation,
   getActivityLocations,
+  isExcursionDay,
 } from "@/lib/itinerary/meal-locations";
 import {
   inferMealTypeFromMinutes,
   MEAL_WINDOWS,
   minutesToTimeString,
-  resolveMealArrivalMinutes,
   type MealType,
   type OpeningHours,
 } from "@/lib/itinerary/hours";
@@ -35,7 +35,6 @@ import {
   minimumLunchStartAfterBreakfast,
   presentMealSlots,
   resolveMealStartMinutes,
-  earliestMealStart,
   type MealSlotStop,
 } from "@/lib/itinerary/meal-slots";
 
@@ -134,6 +133,136 @@ async function persistMealCandidate(
     .single();
 
   return newPlace?.id ?? null;
+}
+
+type MealInsertItem = {
+  stop_type: string;
+  meal_type: MealType;
+  duration_minutes: number;
+  scheduled_time: string;
+  place_id: string;
+};
+
+async function collectMealCandidates(
+  searchAt: { lat: number; lng: number },
+  city: string,
+  meal: MealType,
+  usedGoogleIds: Set<string>,
+  usedMealBrands: Set<string>,
+  apiKey: string
+) {
+  const primary = await fetchMealSuggestionCandidates(
+    searchAt.lat,
+    searchAt.lng,
+    city,
+    meal,
+    [...usedGoogleIds],
+    apiKey,
+    [...usedMealBrands]
+  );
+  const seen = new Set(primary.map((c) => c.placeId));
+  const candidates = [...primary];
+
+  const alt = await fetchAlternativeSuggestion(
+    searchAt.lat,
+    searchAt.lng,
+    city,
+    "restaurant",
+    [...usedGoogleIds, ...seen],
+    apiKey,
+    [...usedMealBrands]
+  );
+  if (alt && !seen.has(alt.placeId)) {
+    candidates.push(alt);
+  }
+
+  return candidates;
+}
+
+async function tryScheduleMealInsertion(
+  supabase: SupabaseClient,
+  tripId: string,
+  date: string,
+  meal: MealType,
+  bounds: { notBefore: number; notAfter: number },
+  workingStops: () => MealSlotStop[],
+  stops: {
+    id: string;
+    meal_type?: string | null;
+    scheduled_time?: string | null;
+    place?: Place | null;
+  }[],
+  searchAt: { lat: number; lng: number },
+  city: string,
+  usedGoogleIds: Set<string>,
+  usedMealBrands: Set<string>,
+  apiKey: string
+): Promise<MealInsertItem | null> {
+  const window = MEAL_WINDOWS[meal];
+  const candidates = await collectMealCandidates(
+    searchAt,
+    city,
+    meal,
+    usedGoogleIds,
+    usedMealBrands,
+    apiKey
+  );
+  const lunchStartForBreakfast = effectiveLunchStartForBreakfastBounds(workingStops());
+  const lunchEndBoundary = lunchStartForBreakfast - MEAL_ACTIVITY_GAP;
+
+  for (const candidate of candidates) {
+    if (!isSitDownRestaurant(candidate.name)) continue;
+    if (isRestaurantBrandUsed(candidate.name, usedMealBrands)) continue;
+
+    const mealStart = resolveMealStartMinutes(date, meal, candidate.openingHours, {
+      notBefore: bounds.notBefore,
+      notAfter: bounds.notAfter,
+      lunchStart: lunchStartForBreakfast,
+    });
+    if (mealStart == null) continue;
+    if (meal === "breakfast" && mealStart + window.duration > lunchEndBoundary) {
+      continue;
+    }
+
+    const placeId = await persistMealCandidate(
+      supabase,
+      tripId,
+      candidate,
+      usedGoogleIds
+    );
+    if (!placeId) continue;
+    registerRestaurantBrand(candidate.name, usedMealBrands);
+
+    if (meal === "breakfast") {
+      const minLunchStart = minimumLunchStartAfterBreakfast(mealStart);
+      const lunchStop = stops.find((s) => s.meal_type === "lunch");
+      if (
+        lunchStop &&
+        !lunchStop.place?.reservation_time &&
+        lunchStop.scheduled_time
+      ) {
+        const currentLunch = parseTimeToMinutes(lunchStop.scheduled_time);
+        if (currentLunch < minLunchStart) {
+          const shifted = minutesToTimeString(minLunchStart);
+          await supabase
+            .from("itinerary_stops")
+            .update({ scheduled_time: shifted })
+            .eq("id", lunchStop.id);
+          lunchStop.scheduled_time = shifted;
+        }
+      }
+    }
+
+    return {
+      stop_type: "meal",
+      meal_type: meal,
+      duration_minutes: window.duration,
+      scheduled_time: minutesToTimeString(mealStart),
+      place_id: placeId,
+    };
+  }
+
+  return null;
 }
 
 /**
@@ -312,84 +441,26 @@ export async function ensureTripMeals(
         activityLocs
       );
 
-      let candidate =
-        (await fetchMealSuggestion(
-          searchAt.lat,
-          searchAt.lng,
-          trip.city,
-          meal,
-          [...usedGoogleIds],
-          apiKey,
-          [...usedMealBrands]
-        )) ??
-        (await fetchAlternativeSuggestion(
-          searchAt.lat,
-          searchAt.lng,
-          trip.city,
-          "restaurant",
-          [...usedGoogleIds],
-          apiKey,
-          [...usedMealBrands]
-        ));
-
-      if (
-        !candidate ||
-        !isSitDownRestaurant(candidate.name) ||
-        isRestaurantBrandUsed(candidate.name, usedMealBrands)
-      ) {
-        continue;
-      }
-
-      const placeId = await persistMealCandidate(
+      const inserted = await tryScheduleMealInsertion(
         supabase,
         tripId,
-        candidate,
-        usedGoogleIds
+        day.date,
+        meal,
+        bounds,
+        workingStops,
+        stops,
+        searchAt,
+        trip.city,
+        usedGoogleIds,
+        usedMealBrands,
+        apiKey
       );
-      if (!placeId) continue;
-      registerRestaurantBrand(candidate.name, usedMealBrands);
-
-      const lunchStartForBreakfast = effectiveLunchStartForBreakfastBounds(
-        workingStops()
-      );
-      const mealStart = resolveMealStartMinutes(day.date, meal, candidate.openingHours, {
-        notBefore: bounds.notBefore,
-        notAfter: bounds.notAfter,
-        lunchStart: lunchStartForBreakfast,
-      });
-      if (mealStart == null) continue;
-
-      const lunchEndBoundary = lunchStartForBreakfast - MEAL_ACTIVITY_GAP;
-      if (meal === "breakfast" && mealStart + window.duration > lunchEndBoundary) {
-        continue;
-      }
-
-      toInsert.push({
-        stop_type: "meal",
-        meal_type: meal,
-        duration_minutes: window.duration,
-        scheduled_time: minutesToTimeString(mealStart),
-        place_id: placeId,
-      });
-
-      if (meal === "breakfast") {
-        const minLunchStart = minimumLunchStartAfterBreakfast(mealStart);
-        const lunchStop = stops.find((s) => s.meal_type === "lunch");
-        if (
-          lunchStop &&
-          !lunchStop.place?.reservation_time &&
-          lunchStop.scheduled_time
-        ) {
-          const currentLunch = parseTimeToMinutes(lunchStop.scheduled_time);
-          if (currentLunch < minLunchStart) {
-            const shifted = minutesToTimeString(minLunchStart);
-            await supabase
-              .from("itinerary_stops")
-              .update({ scheduled_time: shifted })
-              .eq("id", lunchStop.id);
-            lunchStop.scheduled_time = shifted;
-          }
-        }
+      if (inserted) {
+        toInsert.push(inserted);
+      } else if (meal === "breakfast") {
+        console.info(
+          `[ensure-meals] ${day.date} breakfast missing after candidate attempts`
+        );
       }
     }
 
@@ -460,6 +531,97 @@ export async function ensureTripMeals(
         .update({ sort_order: i })
         .eq("id", rhythmSorted[i].id);
     }
+
+    await rescheduleItineraryDay(supabase, day.id, day.date);
+    await removeInvalidMealsAfterReschedule(supabase, day.id);
+  }
+
+  for (const day of days) {
+    const { data: stopsRaw } = await supabase
+      .from("itinerary_stops")
+      .select("*, place:places(*)")
+      .eq("itinerary_day_id", day.id)
+      .order("sort_order");
+
+    const stops = (stopsRaw ?? []).map((s) => ({
+      ...s,
+      place: normalizePlace(s),
+    }));
+
+    const activityLocs = getActivityLocations(
+      stops.map((s) => ({
+        stop_type: s.stop_type,
+        meal_type: s.meal_type,
+        place: s.place,
+      }))
+    );
+    if (isExcursionDay({ lat: hotel.lat, lng: hotel.lng }, activityLocs)) continue;
+
+    const mealCheckStops = stops.map((s) => ({
+      meal_type: s.meal_type,
+      stop_type: s.stop_type,
+      scheduled_time: s.scheduled_time,
+      duration_minutes: s.duration_minutes,
+      place: s.place,
+    }));
+    if (!dayMissingMeals(mealCheckStops).includes("breakfast")) continue;
+
+    const workingStops = (): MealSlotStop[] =>
+      stops.map((s) => ({
+        id: s.id,
+        meal_type: s.meal_type,
+        stop_type: s.stop_type,
+        scheduled_time: s.scheduled_time,
+        duration_minutes: s.duration_minutes,
+        place: s.place,
+      }));
+
+    if (presentMealSlots(workingStops()).has("breakfast")) continue;
+
+    const bounds = mealInsertionBounds(
+      "breakfast",
+      workingStops(),
+      day.date,
+      { lat: hotel.lat, lng: hotel.lng }
+    );
+    if (!bounds) continue;
+
+    const searchAt = getMealSearchLocation(
+      "breakfast",
+      { lat: hotel.lat, lng: hotel.lng },
+      activityLocs
+    );
+    const inserted = await tryScheduleMealInsertion(
+      supabase,
+      tripId,
+      day.date,
+      "breakfast",
+      bounds,
+      workingStops,
+      stops,
+      searchAt,
+      trip.city,
+      usedGoogleIds,
+      usedMealBrands,
+      apiKey
+    );
+    if (!inserted) {
+      console.info(
+        `[ensure-meals] ${day.date} breakfast still missing after final sweep`
+      );
+      continue;
+    }
+
+    await supabase.from("itinerary_stops").insert({
+      itinerary_day_id: day.id,
+      place_id: inserted.place_id,
+      sort_order: stops.length,
+      stop_type: inserted.stop_type,
+      meal_type: inserted.meal_type,
+      duration_minutes: inserted.duration_minutes,
+      scheduled_time: inserted.scheduled_time,
+      is_suggested: true,
+    });
 
     await rescheduleItineraryDay(supabase, day.id, day.date);
     await removeInvalidMealsAfterReschedule(supabase, day.id);

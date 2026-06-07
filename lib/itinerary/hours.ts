@@ -8,6 +8,16 @@ export interface OpeningPeriod {
 export interface OpeningHours {
   periods?: OpeningPeriod[];
   weekday_text?: string[];
+  open_now?: boolean;
+}
+
+/** True when Google returned structured hours (not a stub like `{ open_now: true }`). */
+export function hasUsableOpeningHours(hours?: OpeningHours | null): boolean {
+  return Boolean(hours?.periods?.length || hours?.weekday_text?.length);
+}
+
+function usableOpeningHours(hours?: OpeningHours | null): OpeningHours | null {
+  return hasUsableOpeningHours(hours) ? hours! : null;
 }
 
 /** Minutes from midnight, e.g. "0930" → 570 */
@@ -136,9 +146,10 @@ export function isOpenAt(
 ): boolean {
   const endMinutes = startMinutes + durationMinutes;
   const jsDay = getJsDayOfWeek(dateStr);
+  const structured = usableOpeningHours(hours);
 
-  if (hours?.periods?.length) {
-    return hours.periods.some((p) =>
+  if (structured?.periods?.length) {
+    return structured.periods.some((p) =>
       periodCoversTime(p, jsDay, startMinutes, endMinutes)
     );
   }
@@ -154,14 +165,15 @@ export function getEarliestOpenMinutes(
   hours?: OpeningHours | null
 ): number {
   const jsDay = getJsDayOfWeek(dateStr);
-  if (hours?.periods?.length) {
-    const opens = hours.periods
+  const structured = usableOpeningHours(hours);
+  if (structured?.periods?.length) {
+    const opens = structured.periods
       .filter((p) => p.open.day === jsDay)
       .map((p) => parseGoogleTime(p.open.time));
     if (opens.length > 0) return Math.min(...opens);
   }
-  if (hours?.weekday_text?.length) {
-    const parsed = parseWeekdayTextHours(dateStr, hours.weekday_text);
+  if (structured?.weekday_text?.length) {
+    const parsed = parseWeekdayTextHours(dateStr, structured.weekday_text);
     if (parsed) return parsed.earliest;
   }
   return CATEGORY_DEFAULT_HOURS[category].earliest;
@@ -173,14 +185,15 @@ function getLatestCloseMinutes(
   hours?: OpeningHours | null
 ): number {
   const jsDay = getJsDayOfWeek(dateStr);
-  if (hours?.periods?.length) {
-    const closes = hours.periods
+  const structured = usableOpeningHours(hours);
+  if (structured?.periods?.length) {
+    const closes = structured.periods
       .filter((p) => p.open.day === jsDay && p.close)
       .map((p) => parseGoogleTime(p.close!.time));
     if (closes.length > 0) return Math.max(...closes);
   }
-  if (hours?.weekday_text?.length) {
-    const parsed = parseWeekdayTextHours(dateStr, hours.weekday_text);
+  if (structured?.weekday_text?.length) {
+    const parsed = parseWeekdayTextHours(dateStr, structured.weekday_text);
     if (parsed) return parsed.latest;
   }
   return CATEGORY_DEFAULT_HOURS[category].latest;
@@ -204,9 +217,10 @@ export function adjustStartForOpeningHours(
     return start;
   }
 
-  if (hours?.periods?.length) {
+  const structured = usableOpeningHours(hours);
+  if (structured?.periods?.length) {
     const jsDay = getJsDayOfWeek(dateStr);
-    for (const period of hours.periods) {
+    for (const period of structured.periods) {
       if (period.open.day !== jsDay) continue;
       const openMin = parseGoogleTime(period.open.time);
       const closeMin = period.close ? parseGoogleTime(period.close.time) : 24 * 60;

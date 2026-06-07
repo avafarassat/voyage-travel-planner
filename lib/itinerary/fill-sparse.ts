@@ -3,7 +3,7 @@ import { createEstimateTravelTimeFn } from "@/lib/itinerary/travel";
 import {
   fetchAlternativeSuggestion,
   fetchExperiencesPool,
-  fetchMealSuggestion,
+  fetchMealSuggestionCandidates,
   fetchParksAndNaturePool,
   fetchTopSuggestions,
 } from "@/lib/itinerary/google-places";
@@ -200,9 +200,20 @@ async function resolveMealPlace(
   usedGoogleIds: Set<string>,
   usedMealBrands: Set<string>,
   apiKey: string,
-  date: string
-): Promise<{ placeId: string; googlePlaceId: string; openingHours?: OpeningHours | null } | null> {
-  const mealResult = await fetchMealSuggestion(
+  placement: {
+    date: string;
+    bounds: { notBefore: number; notAfter: number };
+    lunchStart: number | null;
+    workingStops: () => MealSlotStop[];
+  }
+): Promise<{
+  placeId: string;
+  googlePlaceId: string;
+  openingHours?: OpeningHours | null;
+  mealStart: number;
+} | null> {
+  const window = MEAL_WINDOWS[meal];
+  const primary = await fetchMealSuggestionCandidates(
     location.lat,
     location.lng,
     city,
@@ -211,29 +222,75 @@ async function resolveMealPlace(
     apiKey,
     [...usedMealBrands]
   );
-  const candidate = mealResult
-    ? mealResult
-    : await fetchAlternativeSuggestion(
-        location.lat,
-        location.lng,
-        city,
-        "restaurant",
-        [...usedGoogleIds],
-        apiKey,
-        [...usedMealBrands]
-      );
+  const seen = new Set(primary.map((c) => c.placeId));
+  const candidates = [...primary];
 
-  if (
-    !candidate ||
-    isRestaurantBrandUsed(candidate.name, usedMealBrands)
-  ) {
-    return null;
+  const alt = await fetchAlternativeSuggestion(
+    location.lat,
+    location.lng,
+    city,
+    "restaurant",
+    [...usedGoogleIds, ...seen],
+    apiKey,
+    [...usedMealBrands]
+  );
+  if (alt && !seen.has(alt.placeId)) {
+    candidates.push(alt);
   }
 
-  const persisted = await persistMealCandidate(supabase, tripId, candidate, usedGoogleIds);
-  if (!persisted) return null;
-  registerRestaurantBrand(candidate.name, usedMealBrands);
-  return { ...persisted, openingHours: candidate.openingHours ?? null };
+  const lunchEndBoundary =
+    (placement.lunchStart ?? MEAL_WINDOWS.lunch.start) - MEAL_ACTIVITY_GAP;
+
+  for (const candidate of candidates) {
+    if (isRestaurantBrandUsed(candidate.name, usedMealBrands)) continue;
+
+    let mealStart: number | null;
+    if (meal === "breakfast") {
+      mealStart = resolveMealStartMinutes(
+        placement.date,
+        meal,
+        candidate.openingHours,
+        {
+          notBefore: placement.bounds.notBefore,
+          notAfter: placement.bounds.notAfter,
+          lunchStart: placement.lunchStart,
+        }
+      );
+    } else {
+      mealStart = resolveMealArrivalMinutes(
+        placement.date,
+        placement.bounds.notBefore,
+        null,
+        meal,
+        window.duration,
+        candidate.openingHours,
+        {
+          latestStart: placement.bounds.notAfter,
+          notBefore: placement.bounds.notBefore,
+        }
+      );
+    }
+    if (mealStart == null) continue;
+    if (meal === "breakfast" && mealStart + window.duration > lunchEndBoundary) {
+      continue;
+    }
+
+    const persisted = await persistMealCandidate(
+      supabase,
+      tripId,
+      candidate,
+      usedGoogleIds
+    );
+    if (!persisted) continue;
+    registerRestaurantBrand(candidate.name, usedMealBrands);
+    return {
+      ...persisted,
+      openingHours: candidate.openingHours ?? null,
+      mealStart,
+    };
+  }
+
+  return null;
 }
 
 async function persistMealCandidate(
@@ -544,6 +601,7 @@ export async function fillSparseDaysForTrip(
         { lat: hotel.lat, lng: hotel.lng },
         activityLocs
       );
+      const lunchStart = earliestMealStart(workingMealStops(), "lunch");
       const resolved = await resolveMealPlace(
         supabase,
         tripId,
@@ -553,43 +611,21 @@ export async function fillSparseDaysForTrip(
         usedGoogleIds,
         usedMealBrands,
         apiKey,
-        day.date
+        {
+          date: day.date,
+          bounds,
+          lunchStart,
+          workingStops: workingMealStops,
+        }
       );
       if (!resolved) continue;
       if (isPlaceAlreadyOnDay([...dayStops.map(normalizeStopPlace), ...toAdd.map((s) => ({ place_id: s.place_id ?? null, place: null }))], resolved.placeId, resolved.googlePlaceId)) continue;
-
-      const lunchStart = earliestMealStart(workingMealStops(), "lunch");
-      let mealStart: number | null;
-      if (meal === "breakfast") {
-        mealStart = resolveMealStartMinutes(day.date, meal, resolved.openingHours, {
-          notBefore: bounds.notBefore,
-          notAfter: bounds.notAfter,
-          lunchStart,
-        });
-      } else {
-        mealStart = resolveMealArrivalMinutes(
-          day.date,
-          bounds.notBefore,
-          null,
-          meal,
-          window.duration,
-          resolved.openingHours,
-          { latestStart: bounds.notAfter, notBefore: bounds.notBefore }
-        );
-      }
-      if (mealStart == null) continue;
-
-      const lunchEndBoundary =
-        (lunchStart ?? MEAL_WINDOWS.lunch.start) - MEAL_ACTIVITY_GAP;
-      if (meal === "breakfast" && mealStart + window.duration > lunchEndBoundary) {
-        continue;
-      }
 
       toAdd.push({
         stop_type: "meal",
         meal_type: meal,
         duration_minutes: window.duration,
-        scheduled_time: minutesToTimeString(mealStart),
+        scheduled_time: minutesToTimeString(resolved.mealStart),
         is_suggested: true,
         place_id: resolved.placeId,
       });

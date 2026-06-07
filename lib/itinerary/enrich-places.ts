@@ -1,5 +1,6 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { fetchPlaceDetails } from "@/lib/itinerary/google-places";
+import { hasUsableOpeningHours } from "@/lib/itinerary/hours";
 import type { Place } from "@/lib/types";
 
 /** Fetch and persist Google opening hours for places missing them (awaited before reschedule). */
@@ -10,7 +11,7 @@ export async function enrichPlacesOpeningHours(
 ): Promise<void> {
   await Promise.all(
     places
-      .filter((p) => p.google_place_id && !p.opening_hours)
+      .filter((p) => p.google_place_id && !hasUsableOpeningHours(p.opening_hours))
       .map(async (place) => {
         const details = await fetchPlaceDetails(place.google_place_id!, apiKey);
         if (!details?.openingHours) return;
@@ -33,7 +34,8 @@ export function enrichPlacesInBackground(
   void import("@/lib/itinerary/google-places").then(({ resolvePlacePhoto }) =>
     Promise.all(
       places.map(async (place) => {
-        const needsHours = place.google_place_id && !place.opening_hours;
+        const needsHours =
+          place.google_place_id && !hasUsableOpeningHours(place.opening_hours);
         const needsPhoto = !place.photo_url;
 
         if (needsHours && place.google_place_id) {

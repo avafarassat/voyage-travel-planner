@@ -417,6 +417,39 @@ export async function fetchMealsForDates(
   return mealSuggestions;
 }
 
+/** Multiple meal candidates via shared text-search pool (brand/exclude filtered). */
+export async function fetchMealSuggestionCandidates(
+  lat: number,
+  lng: number,
+  city: string,
+  mealLabel: string,
+  excludePlaceIds: string[],
+  apiKey: string,
+  excludeBrandKeys: string[] = [],
+  limit = 8
+): Promise<(PlaceSearchResult & { openingHours?: OpeningHours })[]> {
+  const pool = await searchMealPlaces(
+    lat,
+    lng,
+    city,
+    mealLabel,
+    excludePlaceIds,
+    apiKey,
+    limit,
+    mealLabel === "lunch" ? 8000 : 5000
+  );
+  const usedBrands = new Set(excludeBrandKeys);
+  const candidates: (PlaceSearchResult & { openingHours?: OpeningHours })[] = [];
+
+  for (const place of pool) {
+    if (!isSitDownRestaurant(place.name, place.types ?? [])) continue;
+    if (isRestaurantBrandUsed(place.name, usedBrands)) continue;
+    candidates.push(place);
+  }
+
+  return candidates;
+}
+
 export async function fetchMealSuggestion(
   lat: number,
   lng: number,
@@ -426,27 +459,17 @@ export async function fetchMealSuggestion(
   apiKey: string,
   excludeBrandKeys: string[] = []
 ): Promise<(PlaceSearchResult & { openingHours?: OpeningHours }) | null> {
-  const query = `best ${mealLabel} restaurant in ${city}`;
-  const url = new URL("https://maps.googleapis.com/maps/api/place/textsearch/json");
-  url.searchParams.set("query", query);
-  url.searchParams.set("location", `${lat},${lng}`);
-  url.searchParams.set("radius", "3000");
-  url.searchParams.set("key", apiKey);
-
-  const res = await fetch(url.toString());
-  const data = await res.json();
-  const places = (data.results ?? []) as Parameters<typeof mapLegacyPlace>[0][];
-  const usedBrands = new Set(excludeBrandKeys);
-
-  for (const place of places) {
-    if (excludePlaceIds.includes(place.place_id)) continue;
-    if ((place.rating ?? 0) < 4.0) continue;
-    if (!isSitDownRestaurant(place.name, place.types ?? [])) continue;
-    if (isRestaurantBrandUsed(place.name, usedBrands)) continue;
-    return mapLegacyPlace(place);
-  }
-
-  return null;
+  const candidates = await fetchMealSuggestionCandidates(
+    lat,
+    lng,
+    city,
+    mealLabel,
+    excludePlaceIds,
+    apiKey,
+    excludeBrandKeys,
+    1
+  );
+  return candidates[0] ?? null;
 }
 
 /** Fetch photo (and google id when missing) for a saved place. */
