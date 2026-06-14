@@ -55,6 +55,10 @@ import { ItineraryInterests, MIN_INTERESTS } from "@/components/trip/itinerary-i
 import { PlaceDetailSheet } from "@/components/trip/place-detail-sheet";
 import { MEAL_WINDOWS } from "@/lib/itinerary/hours";
 import {
+  estimateDisplayTravelLegs,
+  type EstimatedMultiLegTravel,
+} from "@/lib/itinerary/travel";
+import {
   GripVertical,
   Sparkles,
   Footprints,
@@ -82,16 +86,7 @@ interface ItinerarySectionProps {
   renderMap?: (places: Place[]) => ReactNode;
 }
 
-interface LegInfo {
-  durationText: string;
-  distanceText: string;
-}
-
-interface MultiDirectionInfo {
-  walking: LegInfo | null;
-  driving: LegInfo | null;
-  transit: LegInfo | null;
-}
+type MultiDirectionInfo = EstimatedMultiLegTravel;
 
 interface LatLng {
   lat: number;
@@ -143,19 +138,17 @@ function stopLocation(
 function TravelLegs({ direction }: { direction?: MultiDirectionInfo }) {
   if (!direction) return null;
   const rows = [
-    { icon: Footprints, label: "Walk", data: direction.walking },
-    { icon: Car, label: "Drive", data: direction.driving },
-    { icon: Train, label: "Transit", data: direction.transit },
-  ].filter((r) => r.data);
-
-  if (rows.length === 0) return null;
+    { icon: Footprints, label: "Est. walk", data: direction.walking },
+    { icon: Car, label: "Est. drive", data: direction.driving },
+    { icon: Train, label: "Est. transit", data: direction.transit },
+  ];
 
   return (
     <div className="ml-6 flex flex-wrap items-center gap-x-4 gap-y-1 py-2 text-xs text-muted-foreground sm:flex-nowrap">
       {rows.map(({ icon: Icon, label, data }) => (
         <span key={label} className="inline-flex items-center gap-1.5 whitespace-nowrap">
           <Icon className="h-3 w-3 shrink-0" />
-          {label}: {data!.durationText} · {data!.distanceText}
+          {label}: {data.durationText}
         </span>
       ))}
     </div>
@@ -475,7 +468,6 @@ export function ItinerarySection({
   renderMap,
 }: ItinerarySectionProps) {
   const [generating, setGenerating] = useState(false);
-  const [directionsLoading, setDirectionsLoading] = useState(false);
   const [reschedulingDayId, setReschedulingDayId] = useState<string | null>(null);
   const [selectedMapDayId, setSelectedMapDayId] = useState<string | null>(null);
   const [interests, setInterests] = useState<TripInterest[]>(trip.interests ?? []);
@@ -485,7 +477,6 @@ export function ItinerarySection({
   const [dayEndTime, setDayEndTime] = useState(
     timeInputValue(trip.day_end_time, "22:00")
   );
-  const [directions, setDirections] = useState<Record<string, MultiDirectionInfo>>({});
   const [restDayId, setRestDayId] = useState<string | null>(null);
   const [restDuration, setRestDuration] = useState("60");
   const [restStartTime, setRestStartTime] = useState("14:00");
@@ -558,21 +549,31 @@ export function ItinerarySection({
     return [...byId.values()];
   }, [selectedMapDayId, stopsByDay]);
 
-  const directionLegsKey = useMemo(() => {
-    if (!hotel) return "";
-    const keys: string[] = [];
-    for (const day of days) {
-      const dayStops = stops
-        .filter((s) => s.itinerary_day_id === day.id)
-        .sort((a, b) => a.sort_order - b.sort_order);
+  // Estimated travel times from coordinates — Google Directions API is not called.
+  const estimatedTravelLoggedRef = useRef(false);
+  const directions = useMemo(() => {
+    if (!hotel) return {} as Record<string, MultiDirectionInfo>;
+
+    const result: Record<string, MultiDirectionInfo> = {};
+    for (const { stops: dayStops } of stopsByDay) {
       for (let i = 0; i < dayStops.length - 1; i++) {
         const from = stopLocation(dayStops[i], hotel);
         const to = stopLocation(dayStops[i + 1], hotel);
-        if (from && to) keys.push(`${dayStops[i].id}-${dayStops[i + 1].id}`);
+        if (!from || !to) continue;
+        const key = `${dayStops[i].id}-${dayStops[i + 1].id}`;
+        result[key] = estimateDisplayTravelLegs(from, to);
       }
     }
-    return keys.join("|");
-  }, [days, stops, hotel]);
+
+    if (Object.keys(result).length > 0 && !estimatedTravelLoggedRef.current) {
+      estimatedTravelLoggedRef.current = true;
+      console.info(
+        "[itinerary] Using estimated travel times from coordinates; Google Directions skipped."
+      );
+    }
+
+    return result;
+  }, [hotel, stopsByDay]);
 
   const hasItinerary = stopsByDay.some(({ stops: s }) => s.length > 0);
   const showLoadingOverlay = generating;
@@ -615,70 +616,6 @@ export function ItinerarySection({
         sparseFillRef.current = false;
       });
   }, [hasItinerary, readOnly, trip.id, onUpdate]);
-
-  useEffect(() => {
-    let cancelled = false;
-
-    (async () => {
-      if (!hotel || !directionLegsKey) {
-        if (!cancelled) {
-          setDirections({});
-          setDirectionsLoading(false);
-        }
-        return;
-      }
-
-      const pairs: { key: string; from: LatLng; to: LatLng }[] = [];
-      for (const { stops: dayStops } of stopsByDay) {
-        for (let i = 0; i < dayStops.length - 1; i++) {
-          const from = stopLocation(dayStops[i], hotel);
-          const to = stopLocation(dayStops[i + 1], hotel);
-          if (!from || !to) continue;
-          pairs.push({
-            key: `${dayStops[i].id}-${dayStops[i + 1].id}`,
-            from,
-            to,
-          });
-        }
-      }
-
-      if (pairs.length === 0) {
-        if (!cancelled) setDirectionsLoading(false);
-        return;
-      }
-
-      setDirectionsLoading(true);
-
-      try {
-        const res = await fetch("/api/directions/multi", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            legs: pairs.map(({ key, from, to }) => ({
-              key,
-              origin: from,
-              destination: to,
-            })),
-          }),
-        });
-
-        if (cancelled) return;
-
-        if (res.ok) {
-          const data = await res.json();
-          setDirections((data.directions as Record<string, MultiDirectionInfo>) ?? {});
-        }
-      } catch {
-        // Keep existing travel times on transient failures
-      } finally {
-        if (!cancelled) setDirectionsLoading(false);
-      }
-    })();
-
-    return () => {
-      cancelled = true;
-    };
-  }, [directionLegsKey, hotel, stopsByDay]);
 
   useEffect(() => {
     if (pendingGenerateRef.current && !generating) {
@@ -989,8 +926,8 @@ export function ItinerarySection({
           </Button>
           <p className="text-sm text-muted-foreground">
             Times account for stay duration plus travel between stops. Use the clock icon
-            on any stop to adjust when plans change. Travel times below show walk, drive,
-            and transit options.
+            on any stop to adjust when plans change. Travel times below are coordinate
+            estimates for walk, drive, and transit.
           </p>
         </>
       )}

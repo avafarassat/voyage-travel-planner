@@ -47,6 +47,62 @@ export function haversineKm(a: LatLng, b: LatLng): number {
   return haversineDistance(a, b);
 }
 
+/** Display-only speeds (km/h) — not used for scheduling. */
+const DISPLAY_WALK_SPEED_KMH = 5;
+const DISPLAY_DRIVE_SPEED_KMH = 30;
+const DISPLAY_TRANSIT_SPEED_KMH = 20;
+const DISPLAY_TRANSIT_WAIT_BUFFER_MIN = 7;
+
+export interface EstimatedLegInfo {
+  durationText: string;
+  distanceText: string;
+  isEstimated: true;
+}
+
+export interface EstimatedMultiLegTravel {
+  walking: EstimatedLegInfo;
+  driving: EstimatedLegInfo;
+  transit: EstimatedLegInfo;
+}
+
+function formatDisplayMinutes(minutes: number): string {
+  return `${Math.max(1, minutes)} min`;
+}
+
+function formatDisplayMiles(km: number): string {
+  const miles = km * 0.621371;
+  if (miles < 0.1) return "< 0.1 mi";
+  return `${miles.toFixed(1)} mi`;
+}
+
+/** Coordinate-based travel estimates for itinerary UI (no Google Directions). */
+export function estimateDisplayTravelLegs(
+  from: LatLng,
+  to: LatLng
+): EstimatedMultiLegTravel {
+  const km = haversineDistance(from, to);
+  const distanceText = formatDisplayMiles(km);
+
+  const walkMinutes = Math.max(1, Math.round((km / DISPLAY_WALK_SPEED_KMH) * 60));
+  const driveMinutes = Math.max(1, Math.round((km / DISPLAY_DRIVE_SPEED_KMH) * 60));
+  const transitMinutes = Math.max(
+    1,
+    Math.round((km / DISPLAY_TRANSIT_SPEED_KMH) * 60) + DISPLAY_TRANSIT_WAIT_BUFFER_MIN
+  );
+
+  const leg = (minutes: number): EstimatedLegInfo => ({
+    durationText: formatDisplayMinutes(minutes),
+    distanceText,
+    isEstimated: true,
+  });
+
+  return {
+    walking: leg(walkMinutes),
+    driving: leg(driveMinutes),
+    transit: leg(transitMinutes),
+  };
+}
+
 export function pickNearestOpenPlace(
   candidates: Place[],
   from: LatLng,
