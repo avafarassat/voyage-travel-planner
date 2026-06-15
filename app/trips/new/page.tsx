@@ -52,8 +52,34 @@ export default function NewTripPage() {
     setForm((prev) => ({ ...prev, country: value }));
   }
 
+  function handleStartDateChange(startDate: string) {
+    setForm((prev) => {
+      const next = { ...prev, start_date: startDate };
+
+      if (!startDate || !prev.end_date) {
+        return next;
+      }
+
+      if (prev.end_date < startDate) {
+        next.end_date = startDate;
+      }
+
+      return next;
+    });
+  }
+
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
+
+    if (form.end_date < form.start_date) {
+      toast({
+        title: "Invalid dates",
+        description: "End date must be on or after the start date.",
+        variant: "destructive",
+      });
+      return;
+    }
+
     setLoading(true);
 
     const supabase = createClient();
@@ -193,7 +219,7 @@ export default function NewTripPage() {
                     id="start"
                     type="date"
                     value={form.start_date}
-                    onChange={(e) => setForm({ ...form, start_date: e.target.value })}
+                    onChange={(e) => handleStartDateChange(e.target.value)}
                     required
                   />
                 </div>
@@ -203,6 +229,7 @@ export default function NewTripPage() {
                     id="end"
                     type="date"
                     value={form.end_date}
+                    min={form.start_date || undefined}
                     onChange={(e) => setForm({ ...form, end_date: e.target.value })}
                     required
                   />
