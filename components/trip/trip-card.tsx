@@ -1,5 +1,6 @@
 "use client";
 
+import { useState } from "react";
 import Link from "next/link";
 import { Calendar } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
@@ -8,12 +9,20 @@ import { TripDatesDialog } from "@/components/trip/trip-dates-dialog";
 import { cn, formatDate } from "@/lib/utils";
 import type { Trip } from "@/lib/types";
 
+const PLACE_PHOTO_PROXY_DISABLED =
+  process.env.NEXT_PUBLIC_DISABLE_PLACE_PHOTO_PROXY === "true";
+
 interface TripCardProps {
   trip: Trip;
   isPast?: boolean;
 }
 
 export function TripCard({ trip, isPast }: TripCardProps) {
+  const [coverFailed, setCoverFailed] = useState(false);
+
+  const showCover =
+    !PLACE_PHOTO_PROXY_DISABLED && trip.cover_image_url && !coverFailed;
+
   return (
     <Card
       className={cn(
@@ -23,15 +32,16 @@ export function TripCard({ trip, isPast }: TripCardProps) {
     >
       <Link href={`/trips/${trip.id}`} className="block">
         <div className="relative h-32 overflow-hidden bg-gradient-to-br from-indigo-400 to-purple-500">
-          {trip.cover_image_url && (
+          {showCover && (
             // eslint-disable-next-line @next/next/no-img-element
             <img
-              src={trip.cover_image_url}
+              src={trip.cover_image_url!}
               alt=""
               className={cn(
                 "h-full w-full object-cover object-center",
                 isPast && "grayscale"
               )}
+              onError={() => setCoverFailed(true)}
             />
           )}
           {isPast && <div className="absolute inset-0 bg-black/25" />}

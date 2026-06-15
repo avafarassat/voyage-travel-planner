@@ -9,6 +9,10 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({ error: "City is required" }, { status: 400 });
   }
 
+  if (process.env.DISABLE_PLACE_PHOTO_PROXY === "true") {
+    return NextResponse.json({ url: null, skipped: true });
+  }
+
   const apiKey = process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY;
   if (!apiKey || apiKey === "your-google-maps-api-key") {
     return NextResponse.json({ error: "Google Maps API key not configured" }, { status: 500 });

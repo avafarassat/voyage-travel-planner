@@ -11,6 +11,8 @@ import { isTripPast } from "@/lib/utils";
 import type { Trip } from "@/lib/types";
 
 async function backfillCoverImages(trips: Trip[], supabase: Awaited<ReturnType<typeof createClient>>) {
+  if (process.env.DISABLE_PLACE_PHOTO_PROXY === "true") return trips;
+
   const apiKey = process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY;
   if (!apiKey || apiKey === "your-google-maps-api-key") return trips;
 

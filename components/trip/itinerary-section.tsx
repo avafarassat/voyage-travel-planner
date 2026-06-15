@@ -90,6 +90,9 @@ interface ItinerarySectionProps {
 
 type MultiDirectionInfo = EstimatedMultiLegTravel;
 
+const PLACE_PHOTO_PROXY_DISABLED =
+  process.env.NEXT_PUBLIC_DISABLE_PLACE_PHOTO_PROXY === "true";
+
 interface LatLng {
   lat: number;
   lng: number;
@@ -172,7 +175,8 @@ function PlaceThumbnail({
     setImgFailed(false);
   }, [place?.id, place?.photo_url]);
 
-  const showPhoto = place?.photo_url && place.id && !imgFailed;
+  const showPhoto =
+    !PLACE_PHOTO_PROXY_DISABLED && place?.photo_url && place.id && !imgFailed;
 
   if (showPhoto) {
     return (
@@ -627,7 +631,7 @@ export function ItinerarySection({
   const showItinerary = hasItinerary && !generating;
 
   useEffect(() => {
-    if (readOnly || photosBackfilledRef.current) return;
+    if (readOnly || photosBackfilledRef.current || PLACE_PHOTO_PROXY_DISABLED) return;
     const missingPhotos = places.some((p) => !p.photo_url);
     if (!missingPhotos) return;
 
