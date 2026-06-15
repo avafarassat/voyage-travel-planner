@@ -36,6 +36,7 @@ NEXT_PUBLIC_DISABLE_AUTO_FILL_SPARSE=true
 | `NEXT_PUBLIC_DISABLE_PLACE_PHOTO_PROXY` | Client (Next.js) | Plan thumbnails, trip cards, place detail sheet skip photo `<img>` / proxy requests; emoji/gradient fallbacks. |
 | `DISABLE_AUTO_FILL_SPARSE` | Server | `/api/itinerary/fill-sparse-days` returns `{ filledDays: 0, skipped: true }` unless body includes `explicit: true`. No Google, no Supabase mutations from that route when skipped. |
 | `NEXT_PUBLIC_DISABLE_AUTO_FILL_SPARSE` | Client (Next.js) | Plan tab does **not** auto-POST `fill-sparse-days` on mount; stored itinerary renders normally. |
+| `NEXT_PUBLIC_USE_MOCK_DESTINATION_AUTOCOMPLETE` | Client (Next.js) | Create Trip destination search uses hardcoded cities; **no** `/api/places/autocomplete` calls. Friendly manual-entry message when real search fails. |
 
 Documented in `.env.example`. **Restart dev server** after changing any `NEXT_PUBLIC_*` flag.
 

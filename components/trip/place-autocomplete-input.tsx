@@ -24,9 +24,12 @@ interface PlaceAutocompleteInputProps {
   onSelect: (selection: AutocompleteSelection) => void;
   city?: string;
   country?: string | null;
-  type?: "lodging" | "establishment";
+  type?: "lodging" | "establishment" | "destination";
   placeholder?: string;
   required?: boolean;
+  /** When set, skips `/api/places/autocomplete` and uses local results (user-initiated only). */
+  mockSearch?: (query: string) => AutocompleteSelection[];
+  formatSearchError?: (raw: string | null) => string;
 }
 
 export function PlaceAutocompleteInput({
@@ -39,6 +42,8 @@ export function PlaceAutocompleteInput({
   type = "establishment",
   placeholder,
   required,
+  mockSearch,
+  formatSearchError,
 }: PlaceAutocompleteInputProps) {
   const [suggestions, setSuggestions] = useState<AutocompleteSelection[]>([]);
   const [open, setOpen] = useState(false);
@@ -76,6 +81,21 @@ export function PlaceAutocompleteInput({
     const timer = setTimeout(async () => {
       setLoading(true);
       setError(null);
+
+      if (mockSearch) {
+        const results = mockSearch(value);
+        setSuggestions(results);
+        setOpen(results.length > 0);
+        if (results.length > 0) {
+          updateMenuPosition();
+          setError(null);
+        } else {
+          setError("No matches — try a different spelling");
+        }
+        setLoading(false);
+        return;
+      }
+
       const params = new URLSearchParams({
         query: value,
         type,
@@ -90,7 +110,8 @@ export function PlaceAutocompleteInput({
         if (!res.ok) {
           setSuggestions([]);
           setOpen(false);
-          setError(data.error ?? "Search failed");
+          const rawError = data.error ?? "Search failed";
+          setError(formatSearchError ? formatSearchError(rawError) : rawError);
           return;
         }
 
@@ -105,14 +126,15 @@ export function PlaceAutocompleteInput({
       } catch {
         setSuggestions([]);
         setOpen(false);
-        setError("Could not search. Check your connection.");
+        const rawError = "Could not search. Check your connection.";
+        setError(formatSearchError ? formatSearchError(rawError) : rawError);
       } finally {
         setLoading(false);
       }
     }, 300);
 
     return () => clearTimeout(timer);
-  }, [value, city, country, type]);
+  }, [value, city, country, type, mockSearch, formatSearchError]);
 
   useEffect(() => {
     if (!open) return;

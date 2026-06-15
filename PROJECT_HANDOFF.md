@@ -63,6 +63,7 @@ Older narrative context may exist in `PROJECT_CONTEXT_V3.md.txt`. For cost contr
 - Use **small, focused commits** by feature.
 - Check `git status --short` before and after changes.
 - Smoke-test in **mock hotel mode** when Google quota is exhausted.
+- Use **mock destination autocomplete** on Create Trip when quota is exhausted (`NEXT_PUBLIC_USE_MOCK_DESTINATION_AUTOCOMPLETE=true`).
 
 ### Env flags (local `.env.local`)
 
@@ -79,6 +80,9 @@ NEXT_PUBLIC_DISABLE_AUTO_FILL_SPARSE=true
 
 # Local hotel explore UI testing only — no Places calls
 NEXT_PUBLIC_USE_MOCK_HOTEL_EXPLORE=true
+
+# Create Trip destination autocomplete — no Places calls
+NEXT_PUBLIC_USE_MOCK_DESTINATION_AUTOCOMPLETE=true
 ```
 
 Documented in `.env.example`.
@@ -167,7 +171,7 @@ Connect a **real hotel pricing/booking provider** before adding nightly rate fil
 2. `git status --short` before and after edits.
 3. **Do not commit or push** until Ava reviews (unless explicitly asked).
 4. Small commits by feature; complete sentences in commit messages.
-5. When quota is exhausted: enable cost flags + `NEXT_PUBLIC_USE_MOCK_HOTEL_EXPLORE=true` for hotel UI smoke tests.
+5. When quota is exhausted: enable cost flags + `NEXT_PUBLIC_USE_MOCK_HOTEL_EXPLORE=true` for hotel UI smoke tests, and/or `NEXT_PUBLIC_USE_MOCK_DESTINATION_AUTOCOMPLETE=true` for Create Trip destination autocomplete.
 6. **Never commit `.env.local`.**
 7. Restart `npm run dev` after changing `NEXT_PUBLIC_*` env vars.
 

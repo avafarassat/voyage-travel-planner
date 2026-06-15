@@ -14,6 +14,29 @@ export interface AutocompleteResult {
   priceLevel?: number;
 }
 
+const DESTINATION_PREFERRED_TYPES = new Set([
+  "locality",
+  "administrative_area_level_1",
+  "administrative_area_level_2",
+  "administrative_area_level_3",
+  "natural_feature",
+  "colloquial_area",
+  "political",
+  "country",
+  "postal_town",
+  "sublocality",
+]);
+
+const ESTABLISHMENT_TYPES = new Set([
+  "restaurant",
+  "lodging",
+  "store",
+  "shopping_mall",
+  "food",
+  "cafe",
+  "bar",
+]);
+
 async function searchPlaces(
   searchQuery: string,
   apiKey: string,
@@ -30,24 +53,41 @@ async function searchPlaces(
   return res.json();
 }
 
+function filterDestinationResults<
+  T extends { types?: string[] }
+>(results: T[]): T[] {
+  const preferred = results.filter((place) =>
+    place.types?.some((t) => DESTINATION_PREFERRED_TYPES.has(t))
+  );
+  if (preferred.length > 0) return preferred;
+
+  const nonEstablishment = results.filter(
+    (place) => !place.types?.some((t) => ESTABLISHMENT_TYPES.has(t))
+  );
+  return nonEstablishment.length > 0 ? nonEstablishment : results;
+}
+
+type RawPlaceResult = {
+  place_id: string;
+  name: string;
+  types?: string[];
+  formatted_address?: string;
+  vicinity?: string;
+  geometry: { location: { lat: number; lng: number } };
+  photos?: { photo_reference: string }[];
+  rating?: number;
+  user_ratings_total?: number;
+  price_level?: number;
+};
+
 function mapResults(
-  data: {
-    results?: {
-      place_id: string;
-      name: string;
-      types?: string[];
-      formatted_address?: string;
-      vicinity?: string;
-      geometry: { location: { lat: number; lng: number } };
-      photos?: { photo_reference: string }[];
-      rating?: number;
-      user_ratings_total?: number;
-      price_level?: number;
-    }[];
-  },
+  data: { results?: RawPlaceResult[] },
   apiKey: string,
-  limit: number
+  limit: number,
+  options?: { includePhotos?: boolean }
 ): AutocompleteResult[] {
+  const includePhotos = options?.includePhotos ?? true;
+
   return (data.results ?? []).slice(0, limit).map((place) => ({
     placeId: place.place_id,
     name: place.name,
@@ -55,9 +95,10 @@ function mapResults(
     lat: place.geometry.location.lat,
     lng: place.geometry.location.lng,
     category: googleTypeToCategory(place.types ?? []),
-    photoUrl: place.photos?.[0]
-      ? `https://maps.googleapis.com/maps/api/place/photo?maxwidth=400&photo_reference=${place.photos[0].photo_reference}&key=${apiKey}`
-      : undefined,
+    photoUrl:
+      includePhotos && place.photos?.[0]
+        ? `https://maps.googleapis.com/maps/api/place/photo?maxwidth=400&photo_reference=${place.photos[0].photo_reference}&key=${apiKey}`
+        : undefined,
     rating: place.rating,
     userRatingsTotal: place.user_ratings_total,
     priceLevel: place.price_level,
@@ -94,6 +135,13 @@ export async function GET(request: NextRequest) {
     data = await searchPlaces(searchQuery, apiKey);
   }
 
+  if (type === "destination" && data.results?.length) {
+    data = {
+      ...data,
+      results: filterDestinationResults(data.results),
+    };
+  }
+
   if (data.status !== "OK" && data.status !== "ZERO_RESULTS") {
     const hint = `${data.status ?? ""} ${data.error_message ?? ""}`.toLowerCase();
     const unavailable =
@@ -113,5 +161,9 @@ export async function GET(request: NextRequest) {
     );
   }
 
-  return NextResponse.json({ results: mapResults(data, apiKey, limit) });
+  return NextResponse.json({
+    results: mapResults(data, apiKey, limit, {
+      includePhotos: type !== "destination",
+    }),
+  });
 }

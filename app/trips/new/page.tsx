@@ -1,18 +1,32 @@
 "use client";
 
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
 import { AppHeader } from "@/components/layout/app-header";
+import { PlaceAutocompleteInput } from "@/components/trip/place-autocomplete-input";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { toast } from "@/components/ui/use-toast";
+import {
+  parseDestinationFromPlace,
+  shouldAutoFillTripName,
+} from "@/lib/maps/parse-destination";
+import {
+  friendlyDestinationSearchError,
+  getMockDestinationResults,
+  USE_MOCK_DESTINATION_AUTOCOMPLETE,
+} from "@/lib/maps/mock-destination-autocomplete";
+
+type CountrySource = "empty" | "auto" | "manual";
 
 export default function NewTripPage() {
   const router = useRouter();
   const [loading, setLoading] = useState(false);
+  const [destinationInput, setDestinationInput] = useState("");
+  const countrySourceRef = useRef<CountrySource>("empty");
   const [form, setForm] = useState({
     name: "",
     city: "",
@@ -20,6 +34,23 @@ export default function NewTripPage() {
     start_date: "",
     end_date: "",
   });
+
+  function handleDestinationChange(value: string) {
+    setDestinationInput(value);
+    setForm((prev) => ({
+      ...prev,
+      city: value,
+      country: countrySourceRef.current === "auto" ? "" : prev.country,
+    }));
+    if (countrySourceRef.current === "auto") {
+      countrySourceRef.current = "empty";
+    }
+  }
+
+  function handleCountryChange(value: string) {
+    countrySourceRef.current = value.trim() ? "manual" : "empty";
+    setForm((prev) => ({ ...prev, country: value }));
+  }
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -96,6 +127,47 @@ export default function NewTripPage() {
                 />
               </div>
               <div className="space-y-2">
+                <Label htmlFor="destination">Destination</Label>
+                <PlaceAutocompleteInput
+                  id="destination"
+                  value={destinationInput}
+                  onValueChange={handleDestinationChange}
+                  onSelect={(selection) => {
+                    const typedBeforeSelect = destinationInput;
+                    const { city, country } = parseDestinationFromPlace(
+                      selection.name,
+                      selection.address
+                    );
+
+                    setDestinationInput(city);
+                    countrySourceRef.current = "auto";
+                    setForm((prev) => {
+                      const next = {
+                        ...prev,
+                        city,
+                        country: country ?? "",
+                      };
+
+                      if (shouldAutoFillTripName(prev.name, typedBeforeSelect, city)) {
+                        next.name = city;
+                      }
+
+                      return next;
+                    });
+                  }}
+                  type="destination"
+                  placeholder="Lake Como"
+                  mockSearch={
+                    USE_MOCK_DESTINATION_AUTOCOMPLETE ? getMockDestinationResults : undefined
+                  }
+                  formatSearchError={friendlyDestinationSearchError}
+                />
+                <p className="text-xs text-muted-foreground">
+                  Start typing a city or destination, then select from the dropdown to
+                  auto-fill location details.
+                </p>
+              </div>
+              <div className="space-y-2">
                 <Label htmlFor="city">City</Label>
                 <Input
                   id="city"
@@ -111,7 +183,7 @@ export default function NewTripPage() {
                   id="country"
                   placeholder="Spain"
                   value={form.country}
-                  onChange={(e) => setForm({ ...form, country: e.target.value })}
+                  onChange={(e) => handleCountryChange(e.target.value)}
                 />
               </div>
               <div className="grid grid-cols-2 gap-4">
