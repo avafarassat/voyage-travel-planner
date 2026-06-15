@@ -8,6 +8,7 @@ import {
   fetchExperiencesPool,
   fetchParksAndNaturePool,
   fetchTopSuggestions,
+  searchMealPlaces,
 } from "@/lib/itinerary/google-places";
 import { generateSmartItinerary } from "@/lib/itinerary/smart-generate";
 import { fillSparseDaysForTrip } from "@/lib/itinerary/fill-sparse";
@@ -35,7 +36,23 @@ import {
   createPlacesQuotaGate,
   QUOTA_EXHAUSTED_USER_MESSAGE,
 } from "@/lib/itinerary/places-quota-gate";
-import { writeThroughGenerateCandidatePools } from "@/lib/itinerary/candidate-pool";
+import {
+  assessPoolShortfalls,
+  computeGeneratePoolThresholds,
+  emptyGoogleTopUpPools,
+  loadDestinationCandidates,
+  loadGenerateCandidatePoolsFromDestinationPool,
+  logPoolGenerateInputs,
+  logPoolGoogleTopUp,
+  logPoolRead,
+  logPoolShortfall,
+  mergeSearchResults,
+  resolveDestinationForTrip,
+  topUpMealsFromGoogle,
+  type GenerateFetchPools,
+  type PoolTopUpStats,
+  writeThroughGenerateCandidatePools,
+} from "@/lib/itinerary/candidate-pool";
 
 export async function POST(request: NextRequest) {
   const supabase = await createClient();
@@ -112,10 +129,74 @@ export async function POST(request: NextRequest) {
   const dates = getTripDates(trip.start_date, trip.end_date);
   logGenerateStart({ tripId, tripDayCount: dates.length });
   const excludeIds = getSuggestionExcludeGoogleIds(places, existingStops);
+  const tripDayCount = dates.length;
+  const thresholds = computeGeneratePoolThresholds(tripDayCount, interests);
 
-  const [interestPool, mealSuggestions, restaurantPool, parksPool, experiencesPool] =
-    await Promise.all([
-    fetchTopSuggestions(
+  const destination = await resolveDestinationForTrip(trip);
+  const poolRows = destination
+    ? await loadDestinationCandidates(destination.destinationId, excludeIds)
+    : [];
+
+  const poolFromGlobal =
+    poolRows.length > 0
+      ? loadGenerateCandidatePoolsFromDestinationPool(poolRows, interests, dates)
+      : null;
+
+  logPoolRead({
+    slug: destination?.slug ?? null,
+    destinationId: destination?.destinationId ?? null,
+    globalCandidatesLoaded: poolRows.length,
+    counts: poolFromGlobal?.counts ?? {
+      totalLoaded: 0,
+      interestPool: 0,
+      restaurantPool: 0,
+      parksPool: 0,
+      experiencesPool: 0,
+      breakfastTagged: 0,
+      lunchTagged: 0,
+      dinnerTagged: 0,
+      activitySightseeing: 0,
+    },
+  });
+
+  const shortfalls = assessPoolShortfalls(
+    poolFromGlobal?.counts ?? {
+      totalLoaded: 0,
+      interestPool: 0,
+      restaurantPool: 0,
+      parksPool: 0,
+      experiencesPool: 0,
+      breakfastTagged: 0,
+      lunchTagged: 0,
+      dinnerTagged: 0,
+      activitySightseeing: 0,
+    },
+    thresholds
+  );
+  logPoolShortfall({ slug: destination?.slug ?? null, shortfalls });
+
+  const topUpStats: PoolTopUpStats = {
+    skippedSufficient: [],
+    attemptedShort: [],
+    skippedQuota: [],
+  };
+  const googleTopUp: GenerateFetchPools = emptyGoogleTopUpPools();
+
+  let interestPool = poolFromGlobal?.interestPool ?? [];
+  let restaurantPool = poolFromGlobal?.restaurantPool ?? [];
+  let parksPool = poolFromGlobal?.parksPool ?? [];
+  let experiencesPool = poolFromGlobal?.experiencesPool ?? [];
+  let mealSuggestions = poolFromGlobal?.mealSuggestions ?? new Map();
+
+  const needsInterestTopUp =
+    (poolFromGlobal?.counts.activitySightseeing ?? 0) < thresholds.activitySightseeing;
+  if (!needsInterestTopUp) {
+    topUpStats.skippedSufficient.push("interest");
+  } else if (!quotaGate.allowLiveFetch()) {
+    topUpStats.skippedQuota.push("interest");
+  } else {
+    topUpStats.attemptedShort.push("interest");
+    const fetched = await fetchTopSuggestions(
       hotel.lat,
       hotel.lng,
       trip.city,
@@ -124,17 +205,20 @@ export async function POST(request: NextRequest) {
       apiKey,
       80,
       quotaGate
-    ),
-    fetchMealsForDates(
-      hotel.lat,
-      hotel.lng,
-      trip.city,
-      dates,
-      excludeIds,
-      apiKey,
-      quotaGate
-    ),
-    fetchTopSuggestions(
+    );
+    googleTopUp.interestPool = fetched;
+    interestPool = mergeSearchResults(interestPool, fetched, 80);
+  }
+
+  const needsRestaurantTopUp =
+    (poolFromGlobal?.counts.restaurantPool ?? 0) < thresholds.restaurant;
+  if (!needsRestaurantTopUp) {
+    topUpStats.skippedSufficient.push("restaurant");
+  } else if (!quotaGate.allowLiveFetch()) {
+    topUpStats.skippedQuota.push("restaurant");
+  } else {
+    topUpStats.attemptedShort.push("restaurant");
+    const fetched = await fetchTopSuggestions(
       hotel.lat,
       hotel.lng,
       trip.city,
@@ -143,8 +227,23 @@ export async function POST(request: NextRequest) {
       apiKey,
       40,
       quotaGate
-    ),
-    fetchParksAndNaturePool(
+    );
+    googleTopUp.restaurantPool = fetched;
+    restaurantPool = mergeSearchResults(restaurantPool, fetched, 40);
+  }
+
+  const needsParksTopUp =
+    thresholds.parksNature != null &&
+    (poolFromGlobal?.counts.parksPool ?? 0) < thresholds.parksNature;
+  if (thresholds.parksNature == null) {
+    topUpStats.skippedSufficient.push("parks_nature");
+  } else if (!needsParksTopUp) {
+    topUpStats.skippedSufficient.push("parks_nature");
+  } else if (!quotaGate.allowLiveFetch()) {
+    topUpStats.skippedQuota.push("parks_nature");
+  } else {
+    topUpStats.attemptedShort.push("parks_nature");
+    const fetched = await fetchParksAndNaturePool(
       hotel.lat,
       hotel.lng,
       trip.city,
@@ -152,8 +251,23 @@ export async function POST(request: NextRequest) {
       apiKey,
       35,
       quotaGate
-    ),
-    fetchExperiencesPool(
+    );
+    googleTopUp.parksPool = fetched;
+    parksPool = mergeSearchResults(parksPool, fetched, 35);
+  }
+
+  const needsExperiencesTopUp =
+    thresholds.experiences != null &&
+    (poolFromGlobal?.counts.experiencesPool ?? 0) < thresholds.experiences;
+  if (thresholds.experiences == null) {
+    topUpStats.skippedSufficient.push("experiences");
+  } else if (!needsExperiencesTopUp) {
+    topUpStats.skippedSufficient.push("experiences");
+  } else if (!quotaGate.allowLiveFetch()) {
+    topUpStats.skippedQuota.push("experiences");
+  } else {
+    topUpStats.attemptedShort.push("experiences");
+    const fetched = await fetchExperiencesPool(
       hotel.lat,
       hotel.lng,
       trip.city,
@@ -161,20 +275,85 @@ export async function POST(request: NextRequest) {
       apiKey,
       35,
       quotaGate
-    ),
-  ]);
+    );
+    googleTopUp.experiencesPool = fetched;
+    experiencesPool = mergeSearchResults(experiencesPool, fetched, 35);
+  }
+
+  const needsAnyMealTopUp =
+    (poolFromGlobal?.counts.breakfastTagged ?? 0) < thresholds.breakfast ||
+    (poolFromGlobal?.counts.lunchTagged ?? 0) < thresholds.lunch ||
+    (poolFromGlobal?.counts.dinnerTagged ?? 0) < thresholds.dinner;
+
+  if (!poolFromGlobal || needsAnyMealTopUp) {
+    if (!poolFromGlobal) {
+      if (!quotaGate.allowLiveFetch()) {
+        topUpStats.skippedQuota.push("meal_breakfast", "meal_lunch", "meal_dinner");
+      } else {
+        topUpStats.attemptedShort.push("meals_all");
+        mealSuggestions = await fetchMealsForDates(
+          hotel.lat,
+          hotel.lng,
+          trip.city,
+          dates,
+          excludeIds,
+          apiKey,
+          quotaGate
+        );
+        for (const [key, place] of mealSuggestions) {
+          googleTopUp.mealSuggestions.set(key, place);
+        }
+      }
+    } else {
+      const mealResult = await topUpMealsFromGoogle(
+        {
+          lat: hotel.lat,
+          lng: hotel.lng,
+          city: trip.city,
+          dates,
+          excludeIds,
+          apiKey,
+          quotaGate,
+          poolMealPools: poolFromGlobal.mealPools,
+          thresholds,
+          topUpStats,
+          googleTopUp,
+        },
+        searchMealPlaces
+      );
+      mealSuggestions = mealResult.mealSuggestions;
+    }
+  } else {
+    topUpStats.skippedSufficient.push("meal_breakfast", "meal_lunch", "meal_dinner");
+  }
+
+  logPoolGoogleTopUp({
+    slug: destination?.slug ?? null,
+    topUpStats,
+    googleFetchedCounts: {
+      interest: googleTopUp.interestPool.length,
+      restaurant: googleTopUp.restaurantPool.length,
+      parks: googleTopUp.parksPool.length,
+      experiences: googleTopUp.experiencesPool.length,
+      meals: googleTopUp.mealSuggestions.size,
+    },
+  });
+
+  logPoolGenerateInputs({
+    slug: destination?.slug ?? null,
+    interestPoolCount: interestPool.length,
+    restaurantPoolCount: restaurantPool.length,
+    parksPoolCount: parksPool.length,
+    experiencesPoolCount: experiencesPool.length,
+    mealPrefetchSlots: mealSuggestions.size,
+    fromGlobalPool: poolRows.length > 0,
+  });
 
   await writeThroughGenerateCandidatePools(
     trip,
     { lat: hotel.lat, lng: hotel.lng },
     interests,
-    {
-      interestPool,
-      restaurantPool,
-      parksPool,
-      experiencesPool,
-      mealSuggestions,
-    }
+    googleTopUp
   );
 
   const poolSeen = new Set(excludeIds);

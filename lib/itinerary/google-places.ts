@@ -381,7 +381,7 @@ export async function fetchExperiencesPool(
     .map(({ score: _score, ...rest }) => rest);
 }
 
-async function searchMealPlaces(
+export async function searchMealPlaces(
   lat: number,
   lng: number,
   city: string,
