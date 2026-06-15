@@ -152,6 +152,7 @@ export function logGenerateStart(params: {
 export function logStoredPlaceHydration(stats: {
   fromStoredDb: number;
   fromDestinationPool: number;
+  scheduleUsableWithoutHours: number;
   liveDetailsAttempted: number;
   skippedQuota: number;
   missingCoordinates: number;

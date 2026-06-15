@@ -11,6 +11,7 @@ import {
 export interface StoredPlaceHydrationStats {
   fromStoredDb: number;
   fromDestinationPool: number;
+  scheduleUsableWithoutHours: number;
   liveDetailsAttempted: number;
   skippedQuota: number;
   missingCoordinates: number;
@@ -20,6 +21,7 @@ export function emptyStoredPlaceHydrationStats(): StoredPlaceHydrationStats {
   return {
     fromStoredDb: 0,
     fromDestinationPool: 0,
+    scheduleUsableWithoutHours: 0,
     liveDetailsAttempted: 0,
     skippedQuota: 0,
     missingCoordinates: 0,
@@ -32,6 +34,35 @@ function placeHasCoordinates(place: Pick<Place, "lat" | "lng">): boolean {
 
 function poolRowHasUsableHours(row: DestinationPoolRow): boolean {
   return hasUsableOpeningHours(row.opening_hours);
+}
+
+function poolRowHasScheduleCoordinates(row: DestinationPoolRow): boolean {
+  return Number.isFinite(row.lat) && Number.isFinite(row.lng);
+}
+
+function placeHasScheduleMetadata(place: Pick<Place, "name" | "category">): boolean {
+  return Boolean(place.name?.trim()) && Boolean(place.category);
+}
+
+/** True when stored (or pool) data is enough to schedule without live Place Details. */
+export function isScheduleUsableStoredPlace(
+  place: Place,
+  poolRow?: DestinationPoolRow
+): boolean {
+  const hasMetadata =
+    placeHasScheduleMetadata(place) ||
+    Boolean(poolRow?.name?.trim() && poolRow?.primary_category);
+  if (!hasMetadata) return false;
+
+  if (placeHasCoordinates(place)) return true;
+  return poolRow != null && poolRowHasScheduleCoordinates(poolRow);
+}
+
+function applyScheduleFieldsFromPool(place: Place, poolRow: DestinationPoolRow): void {
+  if (!placeHasCoordinates(place) && poolRowHasScheduleCoordinates(poolRow)) {
+    place.lat = poolRow.lat;
+    place.lng = poolRow.lng;
+  }
 }
 
 async function persistOpeningHours(
@@ -102,7 +133,11 @@ export async function hydratePlacesOpeningHoursStoredFirst(
   return counts;
 }
 
-/** Pre-generate hydration: stored DB + destination pool only; live details quota-gated. No photos. */
+/**
+ * Pre-generate hydration: stored DB → destination pool → live details (last resort only).
+ * Skips live Place Details when stored data is schedule-usable without opening hours.
+ * No photos; sequential; quota-gated.
+ */
 export async function hydratePlacesForGenerate(
   supabase: SupabaseClient,
   trip: Pick<Trip, "city" | "country">,
@@ -110,13 +145,48 @@ export async function hydratePlacesForGenerate(
   apiKey: string,
   quotaGate: PlacesQuotaGate
 ): Promise<StoredPlaceHydrationStats> {
-  return hydratePlacesOpeningHoursStoredFirst(
-    supabase,
-    places,
-    apiKey,
-    quotaGate,
-    trip
-  );
+  const counts = emptyStoredPlaceHydrationStats();
+
+  const googlePlaceIds = places
+    .map((p) => p.google_place_id)
+    .filter((id): id is string => Boolean(id));
+  const poolByGoogleId = await loadDestinationPoolRowsByGoogleIds(trip, googlePlaceIds);
+
+  for (const place of places) {
+    const poolRow = place.google_place_id
+      ? poolByGoogleId.get(place.google_place_id)
+      : undefined;
+    if (poolRow) {
+      applyScheduleFieldsFromPool(place, poolRow);
+    }
+
+    if (hasUsableOpeningHours(place.opening_hours)) {
+      counts.fromStoredDb++;
+    } else if (poolRow && poolRowHasUsableHours(poolRow)) {
+      place.opening_hours = poolRow.opening_hours;
+      counts.fromDestinationPool++;
+      await persistOpeningHours(supabase, place.id, poolRow.opening_hours!);
+    } else if (isScheduleUsableStoredPlace(place, poolRow)) {
+      counts.scheduleUsableWithoutHours++;
+    } else if (!place.google_place_id) {
+      // No google id and not schedule-usable — nothing to fetch.
+    } else if (!quotaGate.allowLiveFetch()) {
+      counts.skippedQuota++;
+    } else {
+      counts.liveDetailsAttempted++;
+      const details = await fetchPlaceDetails(place.google_place_id, apiKey, quotaGate);
+      if (details?.openingHours) {
+        place.opening_hours = details.openingHours;
+        await persistOpeningHours(supabase, place.id, details.openingHours);
+      }
+    }
+
+    if (!placeHasCoordinates(place)) {
+      counts.missingCoordinates++;
+    }
+  }
+
+  return counts;
 }
 
 /** Fetch and persist Google opening hours for places missing them (awaited before reschedule). */
