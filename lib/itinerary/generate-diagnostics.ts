@@ -1,6 +1,7 @@
 import { dayMissingMeals } from "@/lib/itinerary/meal-locations";
 import type { MealType } from "@/lib/itinerary/hours";
 import { QUOTA_EXHAUSTED_USER_MESSAGE } from "@/lib/itinerary/places-quota-gate";
+import type { QualityGateResult } from "@/lib/itinerary/quality-gate";
 
 const EXPECTED_MIN_STOPS = 5;
 
@@ -170,6 +171,30 @@ export function logPostGeneratePlaceHydration(stats: PlaceHydrationLogStats): vo
 /** Log candidate pool sizes once per Generate (no API keys). */
 export function logGeneratePoolStats(stats: GeneratePoolStats): void {
   console.info("[itinerary-generate] pools", stats);
+}
+
+/** Log quality gate evaluation before replacing an existing itinerary. */
+export function logQualityGate(
+  result: QualityGateResult,
+  hasExistingItinerary: boolean
+): void {
+  const logFn = result.severity === "block" ? console.warn : console.info;
+  logFn("[itinerary-generate] quality_gate", {
+    severity: result.severity,
+    shouldBlockReplacement: result.shouldBlockReplacement,
+    hasExistingItinerary,
+    reasons: result.reasons,
+    generatedDayCount: result.diagnostics.dayCount,
+    generatedStopCount: result.diagnostics.stopCount,
+    existingDayCount: result.diagnostics.existingDayCount ?? 0,
+    existingStopCount: result.diagnostics.existingStopCount ?? 0,
+    missingMealCount: result.diagnostics.totalMissingMealSlots,
+    incompleteMealDayCount: result.diagnostics.incompleteMealDayCount,
+    toleratedIncompleteMealDayCount: result.diagnostics.toleratedIncompleteMealDayCount,
+    lowDensityDays: result.diagnostics.lowDensityDays.length,
+    lowSightseeingDays: result.diagnostics.lowSightseeingDays.length,
+    severeImbalance: result.diagnostics.severeImbalance,
+  });
 }
 
 /** Log trip-level generation outcome once scheduling completes. */

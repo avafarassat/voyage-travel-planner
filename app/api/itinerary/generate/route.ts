@@ -30,11 +30,16 @@ import {
   logGenerateStart,
   logMissingMealsAfterGeneration,
   logPostGeneratePlaceHydration,
+  logQualityGate,
   logStoredPlaceHydration,
   type MissingMealsDaySummary,
 } from "@/lib/itinerary/generate-diagnostics";
 import { dayMissingMeals } from "@/lib/itinerary/meal-locations";
 import type { MealType } from "@/lib/itinerary/hours";
+import {
+  evaluateItineraryQualityGate,
+  type ExistingItineraryStats,
+} from "@/lib/itinerary/quality-gate";
 import {
   createPlacesQuotaGate,
   QUOTA_EXHAUSTED_USER_MESSAGE,
@@ -435,18 +440,94 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  const { data: existingDays } = await supabase
+  const { data: existingDaysForGate } = await supabase
     .from("itinerary_days")
-    .select("id")
+    .select("id, day_number, date")
     .eq("trip_id", tripId);
 
-  if (existingDays?.length) {
+  let existingStats: ExistingItineraryStats | null = null;
+  if (existingDaysForGate?.length) {
+    const { data: existingStopRows } = await supabase
+      .from("itinerary_stops")
+      .select(
+        "itinerary_day_id, stop_type, meal_type, scheduled_time, duration_minutes, place:places(category, reservation_time)"
+      )
+      .in(
+        "itinerary_day_id",
+        existingDaysForGate.map((day) => day.id)
+      );
+
+    const stopsByDayId = new Map<string, NonNullable<typeof existingStopRows>>();
+    for (const stop of existingStopRows ?? []) {
+      const bucket = stopsByDayId.get(stop.itinerary_day_id) ?? [];
+      bucket.push(stop);
+      stopsByDayId.set(stop.itinerary_day_id, bucket);
+    }
+
+    let existingMissingMealDayCount = 0;
+    for (const day of existingDaysForGate) {
+      const dayStops = stopsByDayId.get(day.id) ?? [];
+      const missing = dayMissingMeals(
+        dayStops.map((s) => {
+          const place = Array.isArray(s.place) ? s.place[0] : s.place;
+          return {
+            meal_type: s.meal_type,
+            stop_type: s.stop_type,
+            scheduled_time: s.scheduled_time,
+            duration_minutes: s.duration_minutes,
+            place: place
+              ? {
+                  category: place.category,
+                  reservation_time: place.reservation_time,
+                }
+              : null,
+          };
+        })
+      ) as MealType[];
+      if (missing.length > 0) existingMissingMealDayCount += 1;
+    }
+
+    existingStats = {
+      dayCount: existingDaysForGate.length,
+      stopCount: existingStopRows?.length ?? 0,
+      missingMealDayCount: existingMissingMealDayCount,
+    };
+  }
+
+  const qualityGate = evaluateItineraryQualityGate({
+    generatedDays: generated,
+    tripDayCount: dates.length,
+    hotel: { lat: hotel.lat, lng: hotel.lng },
+    existing: existingStats,
+  });
+  logQualityGate(qualityGate, (existingStats?.stopCount ?? 0) > 0);
+
+  if (qualityGate.severity === "block") {
+    quotaGate.logSummary();
+    const hasExistingItinerary = (existingStats?.stopCount ?? 0) > 0;
+    return NextResponse.json(
+      {
+        error: hasExistingItinerary
+          ? "Generated itinerary did not meet quality standards, so your existing itinerary was preserved."
+          : "Generated itinerary did not meet quality standards. Please try again later or adjust your trip preferences.",
+        qualityGate: {
+          severity: qualityGate.severity,
+          shouldBlockReplacement: qualityGate.shouldBlockReplacement,
+          reasons: qualityGate.reasons,
+          diagnostics: qualityGate.diagnostics,
+        },
+      },
+      { status: hasExistingItinerary ? 409 : 422 }
+    );
+  }
+
+  if (existingDaysForGate?.length) {
     await supabase
       .from("itinerary_stops")
       .delete()
       .in(
         "itinerary_day_id",
-        existingDays.map((d) => d.id)
+        existingDaysForGate.map((d) => d.id)
       );
     await supabase.from("itinerary_days").delete().eq("trip_id", tripId);
   }
@@ -631,16 +712,31 @@ export async function POST(request: NextRequest) {
 
   logMissingMealsAfterGeneration(missingMealSummaries);
   quotaGate.logSummary();
-  const warning = buildGenerateWarning(
+  const mealWarning = buildGenerateWarning(
     missingMealSummaries,
     dayCount,
     quotaGate.isQuotaExhausted()
   );
+  const qualityWarning =
+    qualityGate.severity === "warning"
+      ? "Your itinerary was created, but some days may still need more stops or meals."
+      : undefined;
+  const warning = [mealWarning, qualityWarning].filter(Boolean).join(" ") || undefined;
 
   return NextResponse.json({
     success: true,
     dayCount,
     stopCount,
     ...(warning ? { warning } : {}),
+    ...(qualityGate.severity === "warning"
+      ? {
+          qualityGate: {
+            severity: qualityGate.severity,
+            shouldBlockReplacement: qualityGate.shouldBlockReplacement,
+            reasons: qualityGate.reasons,
+            diagnostics: qualityGate.diagnostics,
+          },
+        }
+      : {}),
   });
 }

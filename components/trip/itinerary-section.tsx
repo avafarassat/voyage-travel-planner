@@ -706,7 +706,18 @@ export function ItinerarySection({
         success?: boolean;
         stopCount?: number;
         warning?: string;
+        qualityGate?: { severity?: string; shouldBlockReplacement?: boolean };
       };
+
+      if (res.status === 409) {
+        toast({
+          title: "We kept your current plan",
+          description:
+            "The new itinerary looked incomplete, so we kept your current plan. Try again later or adjust your trip preferences.",
+          variant: "destructive",
+        });
+        return;
+      }
 
       if (!res.ok) {
         throw new Error(data.error ?? "Generation failed");
