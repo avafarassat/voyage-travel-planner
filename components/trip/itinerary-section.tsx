@@ -757,7 +757,9 @@ export function ItinerarySection({
 
       toast({
         title: restForRemainder
-          ? "Rest day set — other days topped up"
+          ? data.removedStops > 0
+            ? `Rest day set — ${data.removedStops} later stop${data.removedStops === 1 ? "" : "s"} removed`
+            : "Rest day set — other days topped up"
           : "Rest block added",
       });
       setRestDayId(null);
@@ -1285,7 +1287,7 @@ export function ItinerarySection({
                 ? `Blocks from ${restStartTime} through the end of your day (${dayEndTime}). Stops scheduled at or after this time are removed.`
                 : `Blocks ${restStartTime}–${minutesToTimeInput(
                     parseTimeInputToMinutes(restStartTime) + parseInt(restDuration, 10)
-                  )}. Overlapping stops are removed; later stops shift after your rest.`}
+                  )}. Overlapping stops shift after your rest; removing rest restores the normal schedule.`}
             </p>
           </div>
           {!restForRemainder && (

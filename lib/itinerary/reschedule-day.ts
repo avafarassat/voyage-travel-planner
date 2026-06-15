@@ -106,6 +106,45 @@ export function minutesToTimeString(minutes: number): string {
   return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}:00`;
 }
 
+interface RestInterval {
+  start: number;
+  end: number;
+}
+
+function getRestIntervals(stops: RescheduleStop[]): RestInterval[] {
+  return stops
+    .filter((stop) => stop.stop_type === "rest")
+    .map((stop) => {
+      const start = stop.scheduled_time
+        ? parseTimeToMinutes(stop.scheduled_time)
+        : 0;
+      return { start, end: start + (stop.duration_minutes ?? 60) };
+    })
+    .sort((a, b) => a.start - b.start);
+}
+
+/** Push a stop's start past any fixed rest blocks it would overlap. */
+function bumpPastRestIntervals(
+  arrival: number,
+  duration: number,
+  intervals: RestInterval[]
+): number {
+  let start = arrival;
+  let changed = true;
+  while (changed) {
+    changed = false;
+    const end = start + duration;
+    for (const interval of intervals) {
+      if (start < interval.end && end > interval.start) {
+        start = interval.end;
+        changed = true;
+        break;
+      }
+    }
+  }
+  return start;
+}
+
 /** Recompute scheduled_time for all stops in order from a start point. */
 export function rescheduleStopsFromOrder(
   stops: RescheduleStop[],
@@ -120,15 +159,17 @@ export function rescheduleStopsFromOrder(
   let readyToLeave = dayStartMinutes;
   let location = startLocation;
   const timeById = new Map<string, string>();
+  const restIntervals = getRestIntervals(stops);
 
   for (let i = 0; i < rhythmSorted.length; i++) {
     const stop = rhythmSorted[i];
     if (stop.stop_type === "rest") {
-      const arrival = stop.scheduled_time
+      const fixedStart = stop.scheduled_time
         ? parseTimeToMinutes(stop.scheduled_time)
         : readyToLeave;
-      timeById.set(stop.id, minutesToTimeString(arrival));
-      readyToLeave = arrival + (stop.duration_minutes ?? 60);
+      const restEnd = fixedStart + (stop.duration_minutes ?? 60);
+      timeById.set(stop.id, minutesToTimeString(fixedStart));
+      readyToLeave = Math.max(readyToLeave, restEnd);
       location = startLocation;
       continue;
     }
@@ -336,10 +377,16 @@ export function rescheduleStopsFromOrder(
         }
       }
 
-      timeById.set(stop.id, minutesToTimeString(arrival));
       const duration =
         stop.duration_minutes ??
         getDefaultVisitMinutes(stop.place.category ?? "activity");
+
+      if (!stop.anchor_time && restIntervals.length > 0) {
+        arrival = bumpPastRestIntervals(arrival, duration, restIntervals);
+        arrival = Math.max(arrival, chainedMin);
+      }
+
+      timeById.set(stop.id, minutesToTimeString(arrival));
       readyToLeave = arrival + duration;
       location = { lat: stop.place.lat, lng: stop.place.lng };
     } else {
@@ -380,14 +427,15 @@ export function rescheduleFollowingStops(
 
   for (const stop of tail) {
     if (stop.stop_type === "rest") {
-      const arrival = stop.scheduled_time
+      const fixedStart = stop.scheduled_time
         ? parseTimeToMinutes(stop.scheduled_time)
         : readyToLeave;
+      const restEnd = fixedStart + (stop.duration_minutes ?? 60);
       updates.push({
         id: stop.id,
-        scheduled_time: minutesToTimeString(arrival),
+        scheduled_time: minutesToTimeString(fixedStart),
       });
-      readyToLeave = arrival + (stop.duration_minutes ?? 60);
+      readyToLeave = Math.max(readyToLeave, restEnd);
       location = startLocation;
       continue;
     }
@@ -404,13 +452,22 @@ export function rescheduleFollowingStops(
         arrival = parseTimeToMinutes(stop.anchor_time);
       }
 
+      const duration =
+        stop.duration_minutes ??
+        getDefaultVisitMinutes(stop.place.category ?? "activity");
+
+      if (!stop.anchor_time) {
+        const restIntervals = getRestIntervals(stops);
+        if (restIntervals.length > 0) {
+          arrival = bumpPastRestIntervals(arrival, duration, restIntervals);
+          arrival = Math.max(arrival, readyToLeave + travel);
+        }
+      }
+
       updates.push({
         id: stop.id,
         scheduled_time: minutesToTimeString(arrival),
       });
-      const duration =
-        stop.duration_minutes ??
-        getDefaultVisitMinutes(stop.place.category ?? "activity");
       readyToLeave = arrival + duration;
       location = { lat: stop.place.lat, lng: stop.place.lng };
     } else {

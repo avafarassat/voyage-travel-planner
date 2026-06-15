@@ -9,23 +9,6 @@ function stopStartMinutes(stop: { scheduled_time: string | null }): number {
     : 0;
 }
 
-function stopEndMinutes(stop: {
-  scheduled_time: string | null;
-  duration_minutes: number | null;
-}): number {
-  return stopStartMinutes(stop) + (stop.duration_minutes ?? 60);
-}
-
-function overlapsInterval(
-  stop: { scheduled_time: string | null; duration_minutes: number | null },
-  intervalStart: number,
-  intervalEnd: number
-): boolean {
-  const start = stopStartMinutes(stop);
-  const end = stopEndMinutes(stop);
-  return start < intervalEnd && end > intervalStart;
-}
-
 export async function POST(request: NextRequest) {
   const supabase = await createClient();
   const {
@@ -108,13 +91,9 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  const restEndMinutes = startMinutes + finalDuration;
-
-  const stopsToRemove = stops.filter((stop) =>
-    restForRemainder
-      ? stopStartMinutes(stop) >= startMinutes
-      : overlapsInterval(stop, startMinutes, restEndMinutes)
-  );
+  const stopsToRemove = restForRemainder
+    ? stops.filter((stop) => stopStartMinutes(stop) >= startMinutes)
+    : [];
 
   if (stopsToRemove.length) {
     await supabase
