@@ -93,6 +93,9 @@ type MultiDirectionInfo = EstimatedMultiLegTravel;
 const PLACE_PHOTO_PROXY_DISABLED =
   process.env.NEXT_PUBLIC_DISABLE_PLACE_PHOTO_PROXY === "true";
 
+const AUTO_FILL_SPARSE_DISABLED =
+  process.env.NEXT_PUBLIC_DISABLE_AUTO_FILL_SPARSE === "true";
+
 interface LatLng {
   lat: number;
   lng: number;
@@ -651,7 +654,8 @@ export function ItinerarySection({
   }, [places, trip.id, readOnly, onUpdate]);
 
   useEffect(() => {
-    if (readOnly || sparseFillRef.current || !hasItinerary) return;
+    if (readOnly || sparseFillRef.current || !hasItinerary || AUTO_FILL_SPARSE_DISABLED)
+      return;
 
     sparseFillRef.current = true;
     fetch("/api/itinerary/fill-sparse-days", {
@@ -741,7 +745,7 @@ export function ItinerarySection({
         await fetch("/api/itinerary/fill-sparse-days", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ tripId: trip.id }),
+          body: JSON.stringify({ tripId: trip.id, explicit: true }),
         });
       }
 

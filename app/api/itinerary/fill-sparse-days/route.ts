@@ -15,9 +15,18 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  const { tripId } = (await request.json()) as { tripId: string };
+  const body = (await request.json()) as { tripId: string; explicit?: boolean };
+  const { tripId, explicit } = body;
   if (!tripId) {
     return NextResponse.json({ error: "tripId required" }, { status: 400 });
+  }
+
+  if (process.env.DISABLE_AUTO_FILL_SPARSE === "true" && !explicit) {
+    return NextResponse.json({
+      filledDays: 0,
+      skipped: true,
+      reason: "auto fill sparse disabled",
+    });
   }
 
   const apiKey = process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY;
