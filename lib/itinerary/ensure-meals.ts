@@ -42,6 +42,12 @@ import {
   logMealNotPlaced,
 } from "@/lib/itinerary/generate-diagnostics";
 import type { PlacesQuotaGate } from "@/lib/itinerary/places-quota-gate";
+import type { TripInterest } from "@/lib/itinerary/interests";
+import {
+  gatherMealCandidatesForPostPass,
+  loadPostPassDestinationPool,
+  type PostPassDestinationPool,
+} from "@/lib/itinerary/candidate-pool";
 
 function normalizePlace(row: { place?: unknown }): Place | null {
   const p = row.place;
@@ -155,37 +161,27 @@ async function collectMealCandidates(
   usedGoogleIds: Set<string>,
   usedMealBrands: Set<string>,
   apiKey: string,
+  postPassPool: PostPassDestinationPool | null,
+  options?: { relaxed?: boolean },
   quotaGate?: PlacesQuotaGate
 ) {
-  const primary = await fetchMealSuggestionCandidates(
-    searchAt.lat,
-    searchAt.lng,
-    city,
+  return gatherMealCandidatesForPostPass({
     meal,
-    [...usedGoogleIds],
-    apiKey,
-    [...usedMealBrands],
-    8,
-    quotaGate
-  );
-  const seen = new Set(primary.map((c) => c.placeId));
-  const candidates = [...primary];
-
-  const alt = await fetchAlternativeSuggestion(
-    searchAt.lat,
-    searchAt.lng,
+    pool: postPassPool,
+    lat: searchAt.lat,
+    lng: searchAt.lng,
     city,
-    "restaurant",
-    [...usedGoogleIds, ...seen],
+    usedGoogleIds,
+    usedMealBrands,
     apiKey,
-    [...usedMealBrands],
-    quotaGate
-  );
-  if (alt && !seen.has(alt.placeId)) {
-    candidates.push(alt);
-  }
-
-  return candidates;
+    relaxed: options?.relaxed ?? false,
+    quotaGate,
+    logPrefix: "ensure-meals",
+    liveFetch: {
+      fetchMealSuggestionCandidates,
+      fetchAlternativeSuggestion,
+    },
+  });
 }
 
 async function tryScheduleMealInsertion(
@@ -206,6 +202,7 @@ async function tryScheduleMealInsertion(
   usedGoogleIds: Set<string>,
   usedMealBrands: Set<string>,
   apiKey: string,
+  postPassPool: PostPassDestinationPool | null,
   options?: { relaxed?: boolean },
   quotaGate?: PlacesQuotaGate
 ): Promise<MealInsertItem | null> {
@@ -218,6 +215,8 @@ async function tryScheduleMealInsertion(
     usedGoogleIds,
     relaxed ? new Set<string>() : usedMealBrands,
     apiKey,
+    postPassPool,
+    { relaxed },
     quotaGate
   );
   const lunchStartForBreakfast = effectiveLunchStartForBreakfastBounds(workingStops());
@@ -359,6 +358,9 @@ export async function ensureTripMeals(
     if (name) registerRestaurantBrand(name, usedMealBrands);
   }
 
+  const interests = (trip.interests ?? []) as TripInterest[];
+  const postPassPool = await loadPostPassDestinationPool(trip, interests, [...usedGoogleIds]);
+
   for (const day of days) {
     const { data: stopsRaw } = await supabase
       .from("itinerary_stops")
@@ -497,6 +499,7 @@ export async function ensureTripMeals(
         usedGoogleIds,
         usedMealBrands,
         apiKey,
+        postPassPool,
         undefined,
         quotaGate
       );
@@ -516,6 +519,7 @@ export async function ensureTripMeals(
           usedGoogleIds,
           usedMealBrands,
           apiKey,
+          postPassPool,
           { relaxed: true },
           quotaGate
         );
@@ -669,6 +673,7 @@ export async function ensureTripMeals(
       usedGoogleIds,
       usedMealBrands,
       apiKey,
+      postPassPool,
       undefined,
       quotaGate
     );

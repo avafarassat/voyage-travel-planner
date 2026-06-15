@@ -49,6 +49,11 @@ import {
   logMealNotPlaced,
 } from "@/lib/itinerary/generate-diagnostics";
 import type { PlacesQuotaGate } from "@/lib/itinerary/places-quota-gate";
+import {
+  gatherMealCandidatesForPostPass,
+  loadPostPassDestinationPool,
+  type PostPassDestinationPool,
+} from "@/lib/itinerary/candidate-pool";
 
 type StopRow = {
   id: string;
@@ -271,6 +276,7 @@ async function resolveMealPlace(
     lunchStart: number | null;
     workingStops: () => MealSlotStop[];
   },
+  postPassPool: PostPassDestinationPool | null,
   options?: { relaxed?: boolean },
   quotaGate?: PlacesQuotaGate
 ): Promise<{
@@ -281,33 +287,23 @@ async function resolveMealPlace(
 } | null> {
   const relaxed = options?.relaxed ?? false;
   const window = MEAL_WINDOWS[meal];
-  const primary = await fetchMealSuggestionCandidates(
-    location.lat,
-    location.lng,
-    city,
+  const candidates = await gatherMealCandidatesForPostPass({
     meal,
-    [...usedGoogleIds],
-    apiKey,
-    relaxed ? [] : [...usedMealBrands],
-    8,
-    quotaGate
-  );
-  const seen = new Set(primary.map((c) => c.placeId));
-  const candidates = [...primary];
-
-  const alt = await fetchAlternativeSuggestion(
-    location.lat,
-    location.lng,
+    pool: postPassPool,
+    lat: location.lat,
+    lng: location.lng,
     city,
-    "restaurant",
-    [...usedGoogleIds, ...seen],
+    usedGoogleIds,
+    usedMealBrands,
     apiKey,
-    relaxed ? [] : [...usedMealBrands],
-    quotaGate
-  );
-  if (alt && !seen.has(alt.placeId)) {
-    candidates.push(alt);
-  }
+    relaxed,
+    quotaGate,
+    logPrefix: "fill-sparse",
+    liveFetch: {
+      fetchMealSuggestionCandidates,
+      fetchAlternativeSuggestion,
+    },
+  });
 
   const lunchEndBoundary =
     (placement.lunchStart ?? MEAL_WINDOWS.lunch.start) - MEAL_ACTIVITY_GAP;
@@ -511,43 +507,55 @@ export async function fillSparseDaysForTrip(
     }
   }
 
-  const [interestPool, parksPool, experiencesPool] = await Promise.all([
-    fetchTopSuggestions(
-      hotel.lat,
-      hotel.lng,
-      trip.city,
-      interests,
-      [...usedGoogleIds],
-      apiKey,
-      60,
-      quotaGate
-    ),
-    fetchParksAndNaturePool(
-      hotel.lat,
-      hotel.lng,
-      trip.city,
-      [...usedGoogleIds],
-      apiKey,
-      35,
-      quotaGate
-    ),
-    fetchExperiencesPool(
-      hotel.lat,
-      hotel.lng,
-      trip.city,
-      [...usedGoogleIds],
-      apiKey,
-      25,
-      quotaGate
-    ),
-  ]);
+  const postPassPool = await loadPostPassDestinationPool(trip, interests, [...usedGoogleIds]);
 
-  const poolSeen = new Set(usedGoogleIds);
-  const suggestionPool = [...parksPool, ...experiencesPool];
-  for (const place of interestPool) {
-    if (poolSeen.has(place.placeId)) continue;
-    poolSeen.add(place.placeId);
-    suggestionPool.push(place);
+  let suggestionPool: FillSparsePoolEntry[] = postPassPool?.activityPool ?? [];
+  if (postPassPool && suggestionPool.length > 0) {
+    console.info("[fill-sparse] pool_candidates_used", {
+      activityCount: suggestionPool.length,
+      slug: postPassPool.slug,
+    });
+  }
+
+  if (suggestionPool.length === 0 && (!quotaGate || quotaGate.allowLiveFetch())) {
+    const [interestPool, parksPool, experiencesPool] = await Promise.all([
+      fetchTopSuggestions(
+        hotel.lat,
+        hotel.lng,
+        trip.city,
+        interests,
+        [...usedGoogleIds],
+        apiKey,
+        60,
+        quotaGate
+      ),
+      fetchParksAndNaturePool(
+        hotel.lat,
+        hotel.lng,
+        trip.city,
+        [...usedGoogleIds],
+        apiKey,
+        35,
+        quotaGate
+      ),
+      fetchExperiencesPool(
+        hotel.lat,
+        hotel.lng,
+        trip.city,
+        [...usedGoogleIds],
+        apiKey,
+        25,
+        quotaGate
+      ),
+    ]);
+
+    const poolSeen = new Set(usedGoogleIds);
+    suggestionPool = [...parksPool, ...experiencesPool];
+    for (const place of interestPool) {
+      if (poolSeen.has(place.placeId)) continue;
+      poolSeen.add(place.placeId);
+      suggestionPool.push(place);
+    }
   }
 
   const travelTime = createEstimateTravelTimeFn();
@@ -723,6 +731,7 @@ export async function fillSparseDaysForTrip(
           lunchStart,
           workingStops: workingMealStops,
         },
+        postPassPool,
         undefined,
         quotaGate
       );
@@ -742,6 +751,7 @@ export async function fillSparseDaysForTrip(
             lunchStart,
             workingStops: workingMealStops,
           },
+          postPassPool,
           { relaxed: true },
           quotaGate
         );

@@ -19,6 +19,7 @@ import {
   type PoolDiscoverySource,
 } from "@/lib/itinerary/pool-tags";
 import type { PlacesQuotaGate } from "@/lib/itinerary/places-quota-gate";
+import { isRestaurantBrandUsed } from "@/lib/itinerary/meal-dedup";
 
 export type GenerateFetchPools = {
   interestPool: GooglePoolSearchResult[];
@@ -1031,4 +1032,285 @@ export async function topUpMealsFromGoogle(
 
   const mealSuggestions = assignMealSuggestionsForDates(dates, combinedMealPools);
   return { mealSuggestions, combinedMealPools };
+}
+
+/** Saved destination pool for fill-sparse / ensure-meals post-passes. */
+export interface PostPassDestinationPool {
+  slug: string | null;
+  destinationId: string | null;
+  totalLoaded: number;
+  activityPool: GooglePoolSearchResult[];
+  restaurantPool: GooglePoolSearchResult[];
+  mealPools: Record<MealType, GooglePoolSearchResult[]>;
+}
+
+function buildPostPassMealPool(
+  meal: MealType,
+  rows: DestinationPoolRow[]
+): GooglePoolSearchResult[] {
+  const sorted = sortPoolRows(rows);
+  const tagged: GooglePoolSearchResult[] = [];
+  for (const row of sorted) {
+    if (!hasPoolTag(row, meal)) continue;
+    if (
+      !row.is_sit_down_restaurant &&
+      !isSitDownRestaurant(row.name, row.google_types ?? [])
+    ) {
+      continue;
+    }
+    tagged.push(mapPoolRowToSearchResult(row));
+  }
+  const seen = new Set(tagged.map((c) => c.placeId));
+  const merged = [...tagged];
+  for (const row of sortRestaurantFallbackRows(rows.filter(isGeneralRestaurantMealFallback))) {
+    if (seen.has(row.google_place_id)) continue;
+    seen.add(row.google_place_id);
+    merged.push(mapPoolRowToSearchResult(row));
+  }
+  return merged;
+}
+
+function buildPostPassActivityPool(
+  rows: DestinationPoolRow[],
+  interests: TripInterest[]
+): GooglePoolSearchResult[] {
+  const sorted = sortPoolRows(rows);
+  const seen = new Set<string>();
+  const pool: GooglePoolSearchResult[] = [];
+
+  const tryAdd = (row: DestinationPoolRow) => {
+    if (seen.has(row.google_place_id)) return;
+    seen.add(row.google_place_id);
+    pool.push(mapPoolRowToSearchResult(row));
+  };
+
+  for (const row of sorted) {
+    if (row.is_park_nature || hasPoolTag(row, "park_nature")) tryAdd(row);
+    if (row.is_experience || hasPoolTag(row, "experience")) tryAdd(row);
+    if (rowMatchesAnyInterest(row, interests)) tryAdd(row);
+  }
+
+  return pool;
+}
+
+function buildPostPassRestaurantPool(rows: DestinationPoolRow[]): GooglePoolSearchResult[] {
+  return sortRestaurantFallbackRows(rows.filter(isGeneralRestaurantMealFallback)).map(
+    mapPoolRowToSearchResult
+  );
+}
+
+export function logPostPassPoolRead(params: {
+  slug: string | null;
+  destinationId: string | null;
+  totalLoaded: number;
+  activityPool: number;
+  restaurantPool: number;
+  breakfastMealPool: number;
+  lunchMealPool: number;
+  dinnerMealPool: number;
+}): void {
+  console.info("[candidate-pool] postpass_pool_read", params);
+}
+
+/** Load global destination candidates for fill-sparse / ensure-meals. */
+export async function loadPostPassDestinationPool(
+  trip: Pick<Trip, "city" | "country">,
+  interests: TripInterest[],
+  excludeGoogleIds: string[]
+): Promise<PostPassDestinationPool | null> {
+  const destination = await resolveDestinationForTrip(trip);
+  if (!destination) return null;
+
+  const rows = await loadDestinationCandidates(destination.destinationId, excludeGoogleIds);
+  if (rows.length === 0) return null;
+
+  const mealPools: Record<MealType, GooglePoolSearchResult[]> = {
+    breakfast: buildPostPassMealPool("breakfast", rows),
+    lunch: buildPostPassMealPool("lunch", rows),
+    dinner: buildPostPassMealPool("dinner", rows),
+  };
+  const activityPool = buildPostPassActivityPool(rows, interests);
+  const restaurantPool = buildPostPassRestaurantPool(rows);
+
+  logPostPassPoolRead({
+    slug: destination.slug,
+    destinationId: destination.destinationId,
+    totalLoaded: rows.length,
+    activityPool: activityPool.length,
+    restaurantPool: restaurantPool.length,
+    breakfastMealPool: mealPools.breakfast.length,
+    lunchMealPool: mealPools.lunch.length,
+    dinnerMealPool: mealPools.dinner.length,
+  });
+
+  return {
+    slug: destination.slug,
+    destinationId: destination.destinationId,
+    totalLoaded: rows.length,
+    activityPool,
+    restaurantPool,
+    mealPools,
+  };
+}
+
+/** Filter saved meal candidates by used IDs and brand dedup. */
+export function filterUsablePostPassMealCandidates(
+  pool: PostPassDestinationPool | null,
+  meal: MealType,
+  usedGoogleIds: Set<string>,
+  usedMealBrands: Set<string>,
+  relaxed: boolean
+): GooglePoolSearchResult[] {
+  if (!pool) return [];
+  return pool.mealPools[meal].filter((candidate) => {
+    if (usedGoogleIds.has(candidate.placeId)) return false;
+    if (!relaxed && isRestaurantBrandUsed(candidate.name, usedMealBrands)) return false;
+    return true;
+  });
+}
+
+export function postPassPoolHasUnusedMealInventory(
+  pool: PostPassDestinationPool | null,
+  usedGoogleIds: Set<string>
+): boolean {
+  if (!pool) return false;
+  const all = [
+    ...pool.mealPools.breakfast,
+    ...pool.mealPools.lunch,
+    ...pool.mealPools.dinner,
+    ...pool.restaurantPool,
+  ];
+  return all.some((c) => !usedGoogleIds.has(c.placeId));
+}
+
+export type PostPassMealLiveFetchers = {
+  fetchMealSuggestionCandidates: (
+    lat: number,
+    lng: number,
+    city: string,
+    mealLabel: string,
+    excludePlaceIds: string[],
+    apiKey: string,
+    excludeBrandKeys: string[],
+    limit: number,
+    quotaGate?: PlacesQuotaGate
+  ) => Promise<GooglePoolSearchResult[]>;
+  fetchAlternativeSuggestion: (
+    lat: number,
+    lng: number,
+    city: string,
+    category: "restaurant",
+    excludePlaceIds: string[],
+    apiKey: string,
+    excludeBrandKeys: string[],
+    quotaGate?: PlacesQuotaGate
+  ) => Promise<GooglePoolSearchResult | null>;
+};
+
+/**
+ * Pool-first meal candidate collection for post-generate passes.
+ * Live Google is only used when saved pool has no usable candidates and quota allows.
+ */
+export async function gatherMealCandidatesForPostPass(params: {
+  meal: MealType;
+  pool: PostPassDestinationPool | null;
+  lat: number;
+  lng: number;
+  city: string;
+  usedGoogleIds: Set<string>;
+  usedMealBrands: Set<string>;
+  apiKey: string;
+  relaxed: boolean;
+  quotaGate?: PlacesQuotaGate;
+  logPrefix: "fill-sparse" | "ensure-meals";
+  liveFetch: PostPassMealLiveFetchers;
+}): Promise<GooglePoolSearchResult[]> {
+  const {
+    meal,
+    pool,
+    lat,
+    lng,
+    city,
+    usedGoogleIds,
+    usedMealBrands,
+    apiKey,
+    relaxed,
+    quotaGate,
+    logPrefix,
+    liveFetch,
+  } = params;
+
+  const poolCandidates = filterUsablePostPassMealCandidates(
+    pool,
+    meal,
+    usedGoogleIds,
+    usedMealBrands,
+    relaxed
+  );
+
+  if (poolCandidates.length > 0) {
+    console.info(`[${logPrefix}] pool_candidates_used`, {
+      meal,
+      poolCount: poolCandidates.length,
+      slug: pool?.slug ?? null,
+    });
+    return poolCandidates;
+  }
+
+  const quotaAllows = !quotaGate || quotaGate.allowLiveFetch();
+  if (!quotaAllows) {
+    if (postPassPoolHasUnusedMealInventory(pool, usedGoogleIds)) {
+      console.info(`[${logPrefix}] live_fallback_skipped_pool_available`, {
+        meal,
+        slug: pool?.slug ?? null,
+        reason: "quota_exhausted",
+      });
+    }
+    return [];
+  }
+
+  const primary = await liveFetch.fetchMealSuggestionCandidates(
+    lat,
+    lng,
+    city,
+    meal,
+    [...usedGoogleIds],
+    apiKey,
+    relaxed ? [] : [...usedMealBrands],
+    8,
+    quotaGate
+  );
+  const seen = new Set(primary.map((c) => c.placeId));
+  const candidates = [...primary];
+
+  const skipAlt =
+    pool != null &&
+    pool.restaurantPool.some(
+      (r) => !usedGoogleIds.has(r.placeId) && !seen.has(r.placeId)
+    );
+
+  if (skipAlt) {
+    console.info(`[${logPrefix}] live_fallback_skipped_pool_available`, {
+      meal,
+      slug: pool.slug,
+      reason: "restaurant_pool_available",
+      context: "fetchAlternativeSuggestion: restaurant",
+    });
+  } else if (quotaGate?.allowLiveFetch() !== false) {
+    const alt = await liveFetch.fetchAlternativeSuggestion(
+      lat,
+      lng,
+      city,
+      "restaurant",
+      [...usedGoogleIds, ...seen],
+      apiKey,
+      relaxed ? [] : [...usedMealBrands],
+      quotaGate
+    );
+    if (alt && !seen.has(alt.placeId)) {
+      candidates.push(alt);
+    }
+  }
+
+  return candidates;
 }
