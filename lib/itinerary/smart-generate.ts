@@ -47,6 +47,10 @@ import {
   isRestaurantBrandUsed,
   registerRestaurantBrand,
 } from "@/lib/itinerary/meal-dedup";
+import {
+  logDayScheduleDiagnostics,
+  logGenerateResult,
+} from "@/lib/itinerary/generate-diagnostics";
 
 export interface SuggestedPlaceInput {
   placeId: string;
@@ -197,12 +201,12 @@ function pickSuggestion(ctx, near, categories, startMinutes, excludeRestaurant =
         }
         const dist = Math.hypot(candidate.lat - near.lat, candidate.lng - near.lng);
         const score = (candidate.rating ?? 4) * 20 - dist * 100;
+        if (options?.excludePlaceIds?.has(candidate.placeId)) continue;
         if (score > bestScore) {
             bestScore = score;
             best = candidate;
         }
     }
-    if (best) ctx.usedGoogleIds.add(best.placeId);
     return best;
 }
 function registerSuggestionInterests(ctx, candidate) {
@@ -229,32 +233,25 @@ function registerMealInterest(ctx) {
         ]);
     }
 }
-function pickBalancedActivitySuggestion(ctx, near, categories, startMinutes, slotIndex) {
+function pickBalancedActivitySuggestion(ctx, near, categories, startMinutes, slotIndex, options) {
     const ranked = rankActivityInterests(ctx.interests, ctx.dayInterests, ctx.tripInterestCounts, slotIndex);
     for (const interest of ranked){
         const pick = pickSuggestion(ctx, near, categories, startMinutes, true, {
-            preferInterest: interest
+            preferInterest: interest,
+            excludePlaceIds: options?.excludePlaceIds
         });
-        if (pick) {
-            registerSuggestionInterests(ctx, pick);
-            return pick;
-        }
+        if (pick) return pick;
     }
-    const fallback = pickSuggestion(ctx, near, categories, startMinutes);
-    if (fallback) registerSuggestionInterests(ctx, fallback);
-    return fallback;
+    return pickSuggestion(ctx, near, categories, startMinutes, true, {
+        excludePlaceIds: options?.excludePlaceIds
+    });
 }
 function pickMealSuggestion(ctx, near, meal, date, startMinutes) {
     const key = `${date}-${meal}`;
     const cached = ctx.mealSuggestions.get(key);
     const isValidMeal = (candidate)=>!candidate.experience && isSitDownRestaurant(candidate.name) && !ctx.manualGoogleIds.has(candidate.placeId);
-    const take = (candidate)=>{
-        ctx.usedGoogleIds.add(candidate.placeId);
-        registerRestaurantBrand(candidate.name, ctx.usedMealBrandKeys);
-        return candidate;
-    };
     if (cached && !ctx.usedGoogleIds.has(cached.placeId) && !isRestaurantBrandUsed(cached.name, ctx.usedMealBrandKeys) && isValidMeal(cached)) {
-        return take(cached);
+        return cached;
     }
     // Prefetch slot taken — try another cached restaurant for this meal type.
     for (const [slotKey, candidate] of ctx.mealSuggestions){
@@ -263,14 +260,14 @@ function pickMealSuggestion(ctx, near, meal, date, startMinutes) {
         if (ctx.manualGoogleIds.has(candidate.placeId)) continue;
         if (isRestaurantBrandUsed(candidate.name, ctx.usedMealBrandKeys)) continue;
         if (!isValidMeal(candidate)) continue;
-        return take(candidate);
+        return candidate;
     }
     const fallback = pickSuggestion(ctx, near, [
         "restaurant"
     ], startMinutes, false, {
         includeSaved: true
     });
-    if (fallback && isValidMeal(fallback)) return take(fallback);
+    if (fallback && isValidMeal(fallback)) return fallback;
     // Pool exhausted — reuse a prefetched restaurant rather than skip the meal.
     if (cached && isValidMeal(cached)) return cached;
     for (const [, candidate] of ctx.mealSuggestions){
@@ -338,6 +335,9 @@ function markStopPlaceUsed(ctx, stop) {
         ctx.dayUsedGoogleIds.add(gid);
     }
     if (stop.place?.id) ctx.dayUsedPlaceIds.add(stop.place.id);
+    if (stop.stopType === "meal" && stop.suggestedPlace?.name) {
+        registerRestaurantBrand(stop.suggestedPlace.name, ctx.usedMealBrandKeys);
+    }
 }
 async function pushStop(ctx, stops, cursor, stop, travelTime) {
     let start = stop.scheduledTime ? parseReservationMinutes(stop.scheduledTime) : cursor.minutes;
@@ -407,22 +407,68 @@ async function addActivities(ctx, stops, cursor, userPlaces, categories, maxCoun
             break;
         }
         if (placed) continue;
-        const suggested = pickBalancedActivitySuggestion(ctx, cursor.location, categories, cursor.minutes + 10, added);
-        if (!suggested) break;
-        const travel = await ctx.travelTime(cursor.location, {
-            lat: suggested.lat,
-            lng: suggested.lng
-        });
-        const duration = getDefaultVisitMinutes(suggested.category);
-        if (cursor.minutes + travel + duration > deadlineMinutes) break;
-        await pushStop(ctx, stops, cursor, {
-            stopType: "place",
-            suggestedPlace: suggested,
-            durationMinutes: duration,
-            suggestionKey: `${ctx.date}-activity-${added}`,
-            isSuggested: true
-        }, ctx.travelTime);
-        added++;
+        const slotExclude = new Set();
+        let suggestionPlaced = false;
+        const ranked = rankActivityInterests(ctx.interests, ctx.dayInterests, ctx.tripInterestCounts, added);
+        for (const interest of ranked){
+            if (suggestionPlaced) break;
+            while(true){
+                const suggested = pickSuggestion(ctx, cursor.location, categories, cursor.minutes + 10, true, {
+                    preferInterest: interest,
+                    excludePlaceIds: slotExclude
+                });
+                if (!suggested) break;
+                const travel = await ctx.travelTime(cursor.location, {
+                    lat: suggested.lat,
+                    lng: suggested.lng
+                });
+                const duration = getDefaultVisitMinutes(suggested.category);
+                if (cursor.minutes + travel + duration > deadlineMinutes) {
+                    slotExclude.add(suggested.placeId);
+                    continue;
+                }
+                await pushStop(ctx, stops, cursor, {
+                    stopType: "place",
+                    suggestedPlace: suggested,
+                    durationMinutes: duration,
+                    suggestionKey: `${ctx.date}-activity-${added}`,
+                    isSuggested: true
+                }, ctx.travelTime);
+                registerSuggestionInterests(ctx, suggested);
+                added++;
+                suggestionPlaced = true;
+                break;
+            }
+        }
+        if (!suggestionPlaced) {
+            while(true){
+                const suggested = pickSuggestion(ctx, cursor.location, categories, cursor.minutes + 10, true, {
+                    excludePlaceIds: slotExclude
+                });
+                if (!suggested) break;
+                const travel = await ctx.travelTime(cursor.location, {
+                    lat: suggested.lat,
+                    lng: suggested.lng
+                });
+                const duration = getDefaultVisitMinutes(suggested.category);
+                if (cursor.minutes + travel + duration > deadlineMinutes) {
+                    slotExclude.add(suggested.placeId);
+                    continue;
+                }
+                await pushStop(ctx, stops, cursor, {
+                    stopType: "place",
+                    suggestedPlace: suggested,
+                    durationMinutes: duration,
+                    suggestionKey: `${ctx.date}-activity-${added}`,
+                    isSuggested: true
+                }, ctx.travelTime);
+                registerSuggestionInterests(ctx, suggested);
+                added++;
+                suggestionPlaced = true;
+                break;
+            }
+        }
+        if (!suggestionPlaced) break;
     }
 }
 async function addMeal(ctx, stops, cursor, meal, date, reservedMeals, options) {
@@ -467,8 +513,6 @@ async function addMeal(ctx, stops, cursor, meal, date, reservedMeals, options) {
         start = Math.max(adjusted, getMealEarliestMinutes(meal, ctx.date, mealSuggestion.openingHours));
         if (options?.latestStart != null && start > options.latestStart) continue;
 
-        ctx.usedGoogleIds.add(mealSuggestion.placeId);
-        registerRestaurantBrand(mealSuggestion.name, ctx.usedMealBrandKeys);
         await pushStop(ctx, stops, cursor, {
             stopType: "meal",
             suggestedPlace: mealSuggestion,
@@ -557,7 +601,6 @@ async function addMealAtTime(ctx, stops, cursor, meal, date, reservedMeals, star
             });
             if (start + window.duration + travelToAnchor > anchorMinutes) continue;
         }
-        ctx.usedGoogleIds.add(candidate.placeId);
         cursor.minutes = startMinutes;
         cursor.location = ctx.hotel;
         await pushStop(ctx, stops, cursor, {
@@ -903,6 +946,7 @@ async function ensureSightseeingStop(ctx, stops, date, deadlineMinutes) {
         suggestionKey: `${date}-sightseeing`,
         isSuggested: true
     }, ctx.travelTime);
+    registerSuggestionInterests(ctx, pick);
 }
 async function scheduleStandardDay(ctx, dayNumber, date, manualToday, reservedToday) {
     ctx.date = date;
@@ -1083,8 +1127,22 @@ export async function generateSmartItinerary(input) {
     const days = [];
     for (let i = 0; i < dates.length; i++) {
         const date = dates[i];
-        days.push(await scheduleDay(ctx, i + 1, date, manualByDay.get(date) ?? [], reservedByDate.get(date) ?? []));
+        const day = await scheduleDay(ctx, i + 1, date, manualByDay.get(date) ?? [], reservedByDate.get(date) ?? []);
+        logDayScheduleDiagnostics(day.dayNumber, day.date, day.stops);
+        days.push(day);
     }
     await ensureTripManualPlacesScheduled(ctx, days, manualPlaces, dates, reservedByDate);
+    for (const day of days) {
+        logDayScheduleDiagnostics(day.dayNumber, day.date, day.stops);
+    }
+    const totalStops = days.reduce((sum, day) => sum + day.stops.length, 0);
+    logGenerateResult(
+        days.map((d) => ({
+            dayNumber: d.dayNumber,
+            date: d.date,
+            stopCount: d.stops.length
+        })),
+        totalStops
+    );
     return days;
 }

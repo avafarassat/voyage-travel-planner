@@ -75,6 +75,66 @@ function normalizeStopPlace(stop: StopRow) {
 
 const SIGHTSEEING_CATEGORIES = new Set(["monument", "museum", "activity"]);
 
+type FillSparsePoolEntry = {
+  placeId: string;
+  name: string;
+  address: string;
+  lat: number;
+  lng: number;
+  rating?: number;
+  category?: import("@/lib/types").PlaceCategory;
+  photoUrl?: string;
+  openingHours?: OpeningHours | null;
+  types?: string[];
+};
+
+/** Rank fill-sparse activity candidates without mutating used sets. */
+function orderedFillSparseCandidates(
+  suggestionPool: FillSparsePoolEntry[],
+  rankedInterests: ReturnType<typeof rankActivityInterests>,
+  usedGoogleIds: Set<string>,
+  dayGoogleIds: Set<string>,
+  dayThemes: Set<string>,
+  slotExclude: Set<string>
+): FillSparsePoolEntry[] {
+  const seen = new Set<string>();
+  const ordered: FillSparsePoolEntry[] = [];
+
+  const tryAdd = (entry: FillSparsePoolEntry) => {
+    if (seen.has(entry.placeId)) return;
+    if (usedGoogleIds.has(entry.placeId)) return;
+    if (dayGoogleIds.has(entry.placeId)) return;
+    if (slotExclude.has(entry.placeId)) return;
+    if (!themeAllowed(dayThemes, entry.name, entry.category ?? "activity")) return;
+    seen.add(entry.placeId);
+    ordered.push(entry);
+  };
+
+  for (const interest of rankedInterests) {
+    for (const entry of suggestionPool) {
+      if (
+        candidateMatchesInterest(
+          {
+            name: entry.name,
+            category: entry.category ?? "activity",
+            outdoor: isParkOrNaturePlace(entry.types ?? [], entry.name),
+            experience: isExperienceActivity(entry.types ?? [], entry.name),
+          },
+          interest
+        )
+      ) {
+        tryAdd(entry);
+      }
+    }
+  }
+
+  for (const entry of suggestionPool) {
+    tryAdd(entry);
+  }
+
+  return ordered;
+}
+
 function countSightseeingStops(stops: StopRow[]): number {
   return stops.filter((s) => {
     if (s.meal_type) return false;
@@ -308,8 +368,6 @@ async function persistMealCandidate(
   },
   usedGoogleIds: Set<string>
 ): Promise<{ placeId: string; googlePlaceId: string } | null> {
-  usedGoogleIds.add(candidate.placeId);
-
   const { data: existing } = await supabase
     .from("places")
     .select("id")
@@ -324,6 +382,7 @@ async function persistMealCandidate(
         .update({ opening_hours: candidate.openingHours })
         .eq("id", existing.id);
     }
+    usedGoogleIds.add(candidate.placeId);
     return { placeId: existing.id, googlePlaceId: candidate.placeId };
   }
 
@@ -346,6 +405,7 @@ async function persistMealCandidate(
     .single();
 
   if (!newPlace) return null;
+  usedGoogleIds.add(candidate.placeId);
   return { placeId: newPlace.id, googlePlaceId: candidate.placeId };
 }
 
@@ -408,7 +468,10 @@ export async function fillSparseDaysForTrip(
   const usedMealBrands = new Set<string>();
   for (const row of allStops ?? []) {
     const place = normalizePlace(row as StopRow);
-    if (place?.category === "restaurant" || (row as StopRow).meal_type) {
+    if (
+      place?.name &&
+      (place.category === "restaurant" || (row as StopRow).meal_type)
+    ) {
       registerRestaurantBrand(place.name, usedMealBrands);
     }
   }
@@ -680,104 +743,81 @@ export async function fillSparseDaysForTrip(
         tripInterestCounts,
         addedActivities
       );
-
-      let candidate =
-        rankedInterests
-          .map((interest) =>
-            suggestionPool.find(
-              (s) =>
-                !usedGoogleIds.has(s.placeId) &&
-                !dayGoogleIds().has(s.placeId) &&
-                candidateMatchesInterest(
-                  {
-                    name: s.name,
-                    category: s.category ?? "activity",
-                    outdoor: isParkOrNaturePlace(s.types ?? [], s.name),
-                    experience: isExperienceActivity(s.types ?? [], s.name),
-                  },
-                  interest
-                ) &&
-                themeAllowed(dayThemes, s.name, s.category ?? "activity")
-            )
-          )
-          .find(Boolean) ?? null;
-
-      if (!candidate) {
-        candidate =
-          suggestionPool.find(
-            (s) =>
-              !usedGoogleIds.has(s.placeId) &&
-              !dayGoogleIds().has(s.placeId) &&
-              themeAllowed(dayThemes, s.name, s.category ?? "activity")
-          ) ?? null;
-      }
-      if (!candidate) break;
-      if (dayGoogleIds().has(candidate.placeId)) break;
-
-      const category = candidate.category ?? "activity";
-      const outdoor = isParkOrNaturePlace(candidate.types ?? [], candidate.name);
-      const experience = isExperienceActivity(candidate.types ?? [], candidate.name);
-      const duration = getDefaultVisitMinutes(category);
-
-      const travel = await travelTime(cursorLocation, {
-        lat: candidate.lat,
-        lng: candidate.lng,
-      });
-      const travelStart = cursorMinutes + travel;
-      const resolved = resolveVisitArrivalMinutes(
-        day.date,
-        Math.max(travelStart, activityWindow.start),
-        category,
-        duration,
-        candidate.openingHours,
-        { outdoor, experience }
+      const dayIds = dayGoogleIds();
+      const slotExclude = new Set<string>();
+      const candidates = orderedFillSparseCandidates(
+        suggestionPool,
+        rankedInterests,
+        usedGoogleIds,
+        dayIds,
+        dayThemes,
+        slotExclude
       );
-      if (resolved == null) {
-        usedGoogleIds.add(candidate.placeId);
-        continue;
-      }
-      if (resolved + duration > activityDeadline) break;
 
-      usedGoogleIds.add(candidate.placeId);
-      dayThemes.add(placeTheme(candidate.name, candidate.category ?? "activity"));
-      const interestHits = interestsMatchedByCandidate({
-        name: candidate.name,
-        category: candidate.category ?? "activity",
-        outdoor: isParkOrNaturePlace(candidate.types ?? [], candidate.name),
-        experience: isExperienceActivity(candidate.types ?? [], candidate.name),
-      }).filter((interest) => interests.includes(interest));
-      registerInterestHits(tripInterestCounts, dayInterests, interestHits);
+      let placedThisRound = false;
+      for (const candidate of candidates) {
+        const category = candidate.category ?? "activity";
+        const outdoor = isParkOrNaturePlace(candidate.types ?? [], candidate.name);
+        const experience = isExperienceActivity(candidate.types ?? [], candidate.name);
+        const duration = getDefaultVisitMinutes(category);
 
-      const { data: existing } = await supabase
-        .from("places")
-        .select("id")
-        .eq("trip_id", tripId)
-        .eq("google_place_id", candidate.placeId)
-        .maybeSingle();
+        const travel = await travelTime(cursorLocation, {
+          lat: candidate.lat,
+          lng: candidate.lng,
+        });
+        const travelStart = cursorMinutes + travel;
+        const resolved = resolveVisitArrivalMinutes(
+          day.date,
+          Math.max(travelStart, activityWindow.start),
+          category,
+          duration,
+          candidate.openingHours,
+          { outdoor, experience }
+        );
+        if (resolved == null) continue;
+        if (resolved + duration > activityDeadline) continue;
 
-      let placeId = existing?.id;
-      if (!placeId) {
-        const { data: newPlace } = await supabase
+        dayThemes.add(placeTheme(candidate.name, candidate.category ?? "activity"));
+        const interestHits = interestsMatchedByCandidate({
+          name: candidate.name,
+          category: candidate.category ?? "activity",
+          outdoor: isParkOrNaturePlace(candidate.types ?? [], candidate.name),
+          experience: isExperienceActivity(candidate.types ?? [], candidate.name),
+        }).filter((interest) => interests.includes(interest));
+        registerInterestHits(tripInterestCounts, dayInterests, interestHits);
+
+        const { data: existing } = await supabase
           .from("places")
-          .insert({
-            trip_id: tripId,
-            name: candidate.name,
-            category: candidate.category ?? "activity",
-            address: candidate.address,
-            lat: candidate.lat,
-            lng: candidate.lng,
-            source: "suggested",
-            google_place_id: candidate.placeId,
-            rating: candidate.rating ?? null,
-            photo_url: candidate.photoUrl ?? null,
-            opening_hours: candidate.openingHours ?? null,
-          })
           .select("id")
-          .single();
-        placeId = newPlace?.id;
-      }
+          .eq("trip_id", tripId)
+          .eq("google_place_id", candidate.placeId)
+          .maybeSingle();
 
-      if (placeId) {
+        let placeId = existing?.id;
+        if (!placeId) {
+          const { data: newPlace } = await supabase
+            .from("places")
+            .insert({
+              trip_id: tripId,
+              name: candidate.name,
+              category: candidate.category ?? "activity",
+              address: candidate.address,
+              lat: candidate.lat,
+              lng: candidate.lng,
+              source: "suggested",
+              google_place_id: candidate.placeId,
+              rating: candidate.rating ?? null,
+              photo_url: candidate.photoUrl ?? null,
+              opening_hours: candidate.openingHours ?? null,
+            })
+            .select("id")
+            .single();
+          placeId = newPlace?.id;
+        }
+
+        if (!placeId) continue;
+
+        usedGoogleIds.add(candidate.placeId);
         toAdd.push({
           stop_type: "place",
           duration_minutes: duration,
@@ -791,7 +831,11 @@ export async function fillSparseDaysForTrip(
         if (SIGHTSEEING_CATEGORIES.has(category)) {
           sightseeingCount++;
         }
+        placedThisRound = true;
+        break;
       }
+
+      if (!placedThisRound) break;
     }
 
     if (toAdd.length === 0) continue;

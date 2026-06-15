@@ -22,6 +22,7 @@ import {
   getManualPlaces,
   googlePlaceIdsForManualPlaces,
 } from "@/lib/itinerary/manual-places";
+import { logGeneratePoolStats } from "@/lib/itinerary/generate-diagnostics";
 
 export async function POST(request: NextRequest) {
   const supabase = await createClient();
@@ -158,6 +159,18 @@ export async function POST(request: NextRequest) {
     poolSeen.add(place.placeId);
     suggestionPool.push(place);
   }
+
+  const manualPlaces = getManualPlaces(places);
+  logGeneratePoolStats({
+    interestPoolCount: interestPool.length,
+    restaurantPoolCount: restaurantPool.length,
+    parksPoolCount: parksPool.length,
+    experiencesPoolCount: experiencesPool.length,
+    suggestionPoolCount: suggestionPool.length,
+    mealPrefetchSlots: mealSuggestions.size,
+    manualPlaceCount: manualPlaces.length,
+    tripDayCount: dates.length,
+  });
 
   const travelTime = createEstimateTravelTimeFn();
   const generated = await generateSmartItinerary({

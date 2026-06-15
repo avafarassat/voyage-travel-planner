@@ -47,7 +47,7 @@ async function getExcludeGoogleIds(
   extra: string[] = []
 ): Promise<string[]> {
   const [{ data: places }, { data: stops }] = await Promise.all([
-    supabase.from("places").select("google_place_id").eq("trip_id", tripId),
+    supabase.from("places").select("google_place_id, source").eq("trip_id", tripId),
     supabase
       .from("itinerary_stops")
       .select("is_completed, place:places(google_place_id), itinerary_days!inner(trip_id)")
@@ -55,7 +55,7 @@ async function getExcludeGoogleIds(
   ]);
 
   return getSuggestionExcludeGoogleIds(
-    (places ?? []) as { google_place_id: string | null }[],
+    places ?? [],
     (stops ?? []).map((row) => ({
       is_completed: row.is_completed,
       place: Array.isArray(row.place) ? row.place[0] : row.place,
