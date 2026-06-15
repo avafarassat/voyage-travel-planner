@@ -307,6 +307,8 @@ export function TripDashboard({
                     hotel={hotel}
                     city={trip.city}
                     country={trip.country}
+                    tripStartDate={trip.start_date}
+                    tripEndDate={trip.end_date}
                     onUpdate={refresh}
                     onExploreActiveChange={setHotelExploreActive}
                     readOnly={readOnly}

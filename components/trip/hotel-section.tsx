@@ -30,18 +30,36 @@ interface HotelSectionProps {
   hotel: Hotel | null;
   city: string;
   country?: string | null;
+  tripStartDate: string;
+  tripEndDate: string;
   onUpdate: () => void;
   onExploreActiveChange?: (active: boolean) => void;
   readOnly?: boolean;
 }
 
-function hotelFormState(hotel: Hotel | null) {
+function hotelFormState(
+  hotel: Hotel | null,
+  tripStartDate: string,
+  tripEndDate: string
+) {
   return {
     name: hotel?.name ?? "",
     address: hotel?.address ?? "",
-    check_in: hotel?.check_in ?? "",
-    check_out: hotel?.check_out ?? "",
+    check_in: hotel?.check_in ?? tripStartDate,
+    check_out: hotel?.check_out ?? tripEndDate,
     notes: hotel?.notes ?? "",
+  };
+}
+
+function withDefaultHotelDates<T extends { check_in: string; check_out: string }>(
+  form: T,
+  tripStartDate: string,
+  tripEndDate: string
+): T {
+  return {
+    ...form,
+    check_in: form.check_in || tripStartDate,
+    check_out: form.check_out || tripEndDate,
   };
 }
 
@@ -50,6 +68,8 @@ export function HotelSection({
   hotel,
   city,
   country,
+  tripStartDate,
+  tripEndDate,
   onUpdate,
   onExploreActiveChange,
   readOnly,
@@ -65,12 +85,22 @@ export function HotelSection({
   const [coords, setCoords] = useState<{ lat: number; lng: number } | null>(
     hotel ? { lat: hotel.lat, lng: hotel.lng } : null
   );
-  const [form, setForm] = useState(hotelFormState(hotel));
+  const [form, setForm] = useState(() => hotelFormState(hotel, tripStartDate, tripEndDate));
 
   const defaultExploreQuery = defaultHotelExploreQuery(city, country);
 
+  function handleCheckInChange(checkIn: string) {
+    setForm((prev) => {
+      const next = { ...prev, check_in: checkIn };
+      if (checkIn && prev.check_out && prev.check_out < checkIn) {
+        next.check_out = checkIn;
+      }
+      return next;
+    });
+  }
+
   useEffect(() => {
-    setForm(hotelFormState(hotel));
+    setForm(hotelFormState(hotel, tripStartDate, tripEndDate));
     setCoords(hotel ? { lat: hotel.lat, lng: hotel.lng } : null);
     setIsEditing(false);
     setShowManualForm(false);
@@ -79,7 +109,7 @@ export function HotelSection({
     setExploreError(null);
     setExploreQuery(defaultHotelExploreQuery(city, country));
     onExploreActiveChange?.(false);
-  }, [hotel, city, country, onExploreActiveChange]);
+  }, [hotel, city, country, tripStartDate, tripEndDate, onExploreActiveChange]);
 
   async function runHotelSearch(displayQuery: string) {
     setExploreLoading(true);
@@ -134,6 +164,7 @@ export function HotelSection({
 
   function openExplore() {
     const query = defaultHotelExploreQuery(city, country);
+    setForm((prev) => withDefaultHotelDates(prev, tripStartDate, tripEndDate));
     setShowExplore(true);
     setShowManualForm(false);
     setIsEditing(false);
@@ -224,7 +255,7 @@ export function HotelSection({
   }
 
   function handleCancelEdit() {
-    setForm(hotelFormState(hotel));
+    setForm(hotelFormState(hotel, tripStartDate, tripEndDate));
     setCoords(hotel ? { lat: hotel.lat, lng: hotel.lng } : null);
     setIsEditing(false);
     setShowManualForm(false);
@@ -267,11 +298,17 @@ export function HotelSection({
           }}
           onSelect={(selection) => {
             setCoords({ lat: selection.lat, lng: selection.lng });
-            setForm({
-              ...form,
-              name: selection.name,
-              address: selection.address,
-            });
+            setForm((prev) =>
+              withDefaultHotelDates(
+                {
+                  ...prev,
+                  name: selection.name,
+                  address: selection.address,
+                },
+                tripStartDate,
+                tripEndDate
+              )
+            );
           }}
           city={city}
           country={country}
@@ -304,7 +341,9 @@ export function HotelSection({
             id="check-in"
             type="date"
             value={form.check_in}
-            onChange={(e) => setForm({ ...form, check_in: e.target.value })}
+            min={tripStartDate}
+            max={form.check_out || tripEndDate}
+            onChange={(e) => handleCheckInChange(e.target.value)}
           />
         </div>
         <div className="space-y-2">
@@ -313,6 +352,8 @@ export function HotelSection({
             id="check-out"
             type="date"
             value={form.check_out}
+            min={form.check_in || tripStartDate}
+            max={tripEndDate}
             onChange={(e) => setForm({ ...form, check_out: e.target.value })}
           />
         </div>
@@ -464,7 +505,10 @@ export function HotelSection({
             type="button"
             variant="outline"
             className="sm:flex-1"
-            onClick={() => setShowManualForm(true)}
+            onClick={() => {
+              setForm((prev) => withDefaultHotelDates(prev, tripStartDate, tripEndDate));
+              setShowManualForm(true);
+            }}
           >
             Enter manually
           </Button>
