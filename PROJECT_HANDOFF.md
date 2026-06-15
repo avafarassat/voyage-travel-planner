@@ -1,6 +1,6 @@
 # Voyage — project handoff
 
-**Last updated:** 2026-06-14  
+**Last updated:** 2026-06-15  
 **Primary cost-control reference:** [`COST_SAFETY_CHECKPOINT.md`](./COST_SAFETY_CHECKPOINT.md) — read this before any Google-related work.
 
 ---
@@ -68,6 +68,7 @@ Older narrative context may exist in `PROJECT_CONTEXT_V3.md.txt`. For cost contr
 - Check `git status --short` before and after changes.
 - Smoke-test with **mock modes** when Google quota is exhausted (see env flags below).
 - Raise **Maps JavaScript** quota cautiously if needed for visual map testing only.
+- **Generate empty guard:** when Places returns no candidates, Generate fails with a friendly error and does **not** wipe an existing itinerary (see §8).
 
 ### Env flags (local `.env.local`)
 
@@ -213,12 +214,19 @@ Connect a **real hotel pricing/booking provider** before adding nightly rate fil
 
 ## 8. Plan / itinerary — current state
 
-**Key file:** `components/trip/itinerary-section.tsx`
+**Key files:** `components/trip/itinerary-section.tsx`, `app/api/itinerary/generate/route.ts`, `lib/itinerary/google-places.ts`
 
 - **Collapsible days** — Day 1 expanded by default; others collapsed (not persisted).
 - **Travel times** — local estimates (`Est. walk` / `drive` / `transit`) via `estimateDisplayTravelLegs` in `lib/itinerary/travel.ts`. **No Directions API** from Plan UI.
 - **Auto fill-sparse** gated by env flags — Plan mount does not POST `fill-sparse-days` when `NEXT_PUBLIC_DISABLE_AUTO_FILL_SPARSE=true`.
 - **Generate** is explicit button action only; still heavy — do not run casually.
+- **Generate safety guard (2026-06-15)** — protects users when Places quota is exhausted or Google returns empty candidate pools:
+  - Generate **fails safely** when zero stops are produced.
+  - `POST /api/itinerary/generate` returns a **friendly non-200** (503) if `stopCount === 0`, with a user-facing message about Places being unavailable or over quota.
+  - **Existing itinerary rows are preserved** — delete/replace only runs after generated `stopCount > 0` is confirmed.
+  - On success, response includes `{ success: true, dayCount, stopCount }`.
+  - UI shows **“Itinerary ready!”** only when `stopCount > 0`; quota/empty failures show the server error or a client fallback message instead.
+  - Google Places **non-OK statuses** are logged server-side in `lib/itinerary/google-places.ts` (status, optional `error_message`, query context — no API keys).
 - Barcelona itinerary had prior fixes for **meal timing**, **anchors**, **opening-hours enrichment**, and **sparse-day rescheduling** (commits `f32cf6c`, `6385f77`).
 
 ---
