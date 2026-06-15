@@ -20,6 +20,45 @@ export type StopType = "place" | "meal" | "rest";
 
 export type MealType = "breakfast" | "lunch" | "dinner";
 
+/** Global lifecycle for a row in destination_place_candidates (shared inventory). */
+export type CandidateGlobalStatus = "active" | "retired" | "pending_refresh";
+
+/** Per-trip scheduler state for a candidate in trip_candidate_pool. */
+export type TripCandidateStatus =
+  | "available"
+  | "placed"
+  | "rejected"
+  | "removed_by_user"
+  | "reserved";
+
+/** Why a trip candidate was rejected during scheduling (trip_candidate_pool). */
+export type CandidateRejectionReason =
+  | "opening_hours"
+  | "proximity"
+  | "duplicate_brand"
+  | "duplicate_day"
+  | "scheduler_failed"
+  | "user_dismissed"
+  | "low_quality";
+
+/**
+ * Scheduling role tags on pool rows (multi-valued).
+ * Distinct from primary_category / PlaceCategory — e.g. a restaurant may tag lunch + dinner.
+ */
+export type PoolTag =
+  | "breakfast"
+  | "lunch"
+  | "dinner"
+  | "restaurant"
+  | "museum"
+  | "monument"
+  | "shopping"
+  | "nightlife"
+  | "bar"
+  | "park_nature"
+  | "experience"
+  | "food_market";
+
 export type TripInterest =
   | "shopping"
   | "restaurants"
@@ -79,6 +118,7 @@ export interface Hotel {
 }
 
 export interface Place {
+  /** Trip-scoped saved venue (manual My Places or suggested stop backing row). Not shared inventory. */
   id: string;
   trip_id: string;
   name: string;
@@ -95,6 +135,80 @@ export interface Place {
   reservation_time: string | null;
   opening_hours: OpeningHours | null;
   created_at: string;
+}
+
+/**
+ * Shared destination registry (city/region). One row per normalized destination slug.
+ * Populated and refreshed by server-side pool jobs — not trip-scoped.
+ */
+export interface Destination {
+  id: string;
+  slug: string;
+  city: string;
+  country: string | null;
+  center_lat: number | null;
+  center_lng: number | null;
+  google_place_id: string | null;
+  last_pool_refresh_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+/**
+ * Shared destination-level candidate inventory keyed by google_place_id.
+ * Reused across trips to the same destination. No photo URLs stored here.
+ * Contrast with Place, which is trip-scoped and may include user-specific fields.
+ */
+export interface DestinationPlaceCandidate {
+  id: string;
+  destination_id: string;
+  google_place_id: string;
+  name: string;
+  address: string | null;
+  lat: number;
+  lng: number;
+  primary_category: PlaceCategory;
+  pool_tags: PoolTag[];
+  google_types: string[];
+  rating: number | null;
+  user_ratings_total: number | null;
+  price_level: number | null;
+  opening_hours: OpeningHours | null;
+  is_sit_down_restaurant: boolean;
+  is_experience: boolean;
+  is_park_nature: boolean;
+  quality_score: number;
+  global_status: CandidateGlobalStatus;
+  permanently_closed: boolean;
+  discovered_at: string;
+  last_refreshed_at: string;
+  last_seen_at: string;
+  discovery_source: string | null;
+}
+
+/**
+ * Per-trip candidate deck: snapshot + scheduler state for one Generate/regenerate run.
+ * Tracks available / placed / rejected candidates for a trip without mutating global inventory.
+ */
+export interface TripCandidatePoolEntry {
+  id: string;
+  trip_id: string;
+  destination_candidate_id: string | null;
+  google_place_id: string;
+  name: string;
+  lat: number;
+  lng: number;
+  primary_category: PlaceCategory;
+  pool_tags: PoolTag[];
+  opening_hours: OpeningHours | null;
+  rating: number | null;
+  status: TripCandidateStatus;
+  rejection_reason: CandidateRejectionReason | null;
+  placed_stop_id: string | null;
+  placed_day_id: string | null;
+  generation_run_id: string;
+  created_at: string;
+  updated_at: string;
 }
 
 export interface Flight {
