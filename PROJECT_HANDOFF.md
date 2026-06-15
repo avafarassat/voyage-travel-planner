@@ -1,6 +1,6 @@
 # Voyage — project handoff
 
-**Last updated:** 2026-06-15 (persistent candidate pools: Phase C pool-first Generate, Phase C.1 restaurant meal fallback; next: controlled validation or Phase D)  
+**Last updated:** 2026-06-15 (persistent candidate pools: Phases B′–C.3 complete — pool-first Generate, post-passes, stored-data hydration; next: controlled C.3 validation or quality/density work)  
 **Primary cost-control reference:** [`COST_SAFETY_CHECKPOINT.md`](./COST_SAFETY_CHECKPOINT.md) — read this before any Google-related work.
 
 ---
@@ -31,6 +31,8 @@ Trip dashboard tabs: **My Map**, **My Places** (mobile), **Plan**, **Flights**, 
 ### Recent important commits
 
 ```
+<Phase C.3> Generate place hydration stored-data-first
+<Phase C.2> Use destination pool in itinerary post-passes
 <Phase C.1> Use restaurant pool to supplement meal candidates
 <Phase C> Read destination candidate pool before Google top-up
 f3e0af5 Cache generated Places candidates
@@ -73,8 +75,9 @@ Older narrative context may exist in `PROJECT_CONTEXT_V3.md.txt`. For cost contr
 - **Generate uses Places** when the button is clicked — test sparingly; prefer reading server logs from a single run over re-running Generate. **Do not repeatedly click Generate** while debugging; one controlled test at a time.
 - **Plan travel times** stay on **local coordinate estimates** only (`lib/itinerary/travel.ts`) — no Directions API from Plan UI. **Do not call Google Directions.**
 - **No automatic Places calls on page load** — searches remain user-initiated (Generate button, autocomplete typing, Discover search, etc.).
-- **Generate reads saved pool first (Phase C).** Live Google Places is used **only to top up shortfalls** when global pool counts are below trip-length thresholds. **`fill-sparse`**, **`ensure-meals`**, and **`refresh-suggestion`** still use live Google today — not yet pool-first.
-- **Quota gate (Phase B′):** once `OVER_QUERY_LIMIT` or `RESOURCE_EXHAUSTED` is detected in a Generate request, later live Places calls in that same request are skipped — including `fill-sparse` and `ensure-meals` meal searches.
+- **Generate reads saved pool first (Phases C–C.2).** Main Generate and post-passes (`fill-sparse`, `ensure-meals`) load `destination_place_candidates` before live Google. Live Places is used **only to top up true shortfalls** when saved inventory is insufficient and quota allows. **`refresh-suggestion`** is not pool-first yet.
+- **Pre-generate hydration is stored-data-first (Phase C.3).** Generate no longer calls `enrichPlacesInBackground` before scheduling. Opening hours come from stored DB → destination pool → live `fetchPlaceDetails` (quota-gated). **No photo backfill during Generate.**
+- **Quota gate (Phase B′):** once `OVER_QUERY_LIMIT` or `RESOURCE_EXHAUSTED` is detected in a Generate request, later live Places calls in that same request are skipped — including `fill-sparse`, `ensure-meals`, meal searches, and details hydration.
 - **Pool refresh (future)** must be **explicit, scheduled, or admin-controlled** — not uncontrolled per page load or per Plan mount.
 - **`SUPABASE_SERVICE_ROLE_KEY`** — server-only; required for global candidate pool read/write (see §8). Documented in `.env.example`. **Never commit `.env.local`.** Key is present locally in `.env.local` for dev pool operations.
 
@@ -222,7 +225,7 @@ Connect a **real hotel pricing/booking provider** before adding nightly rate fil
 
 ## 8. Plan / itinerary — current state
 
-**Key files:** `components/trip/itinerary-section.tsx`, `app/api/itinerary/generate/route.ts`, `lib/itinerary/smart-generate.ts`, `lib/itinerary/google-places.ts`, `lib/itinerary/places-quota-gate.ts`, `lib/itinerary/candidate-pool.ts`, `lib/itinerary/pool-tags.ts`, `lib/supabase/service.ts`, `lib/itinerary/reschedule-day.ts`, `lib/itinerary/apply-reschedule.ts`, `lib/itinerary/fill-sparse.ts`, `lib/itinerary/ensure-meals.ts`, `lib/itinerary/generate-diagnostics.ts`
+**Key files:** `components/trip/itinerary-section.tsx`, `app/api/itinerary/generate/route.ts`, `lib/itinerary/smart-generate.ts`, `lib/itinerary/google-places.ts`, `lib/itinerary/places-quota-gate.ts`, `lib/itinerary/candidate-pool.ts`, `lib/itinerary/enrich-places.ts`, `lib/itinerary/pool-tags.ts`, `lib/supabase/service.ts`, `lib/itinerary/reschedule-day.ts`, `lib/itinerary/apply-reschedule.ts`, `lib/itinerary/fill-sparse.ts`, `lib/itinerary/ensure-meals.ts`, `lib/itinerary/generate-diagnostics.ts`
 
 ### Core Plan behavior
 
@@ -308,6 +311,12 @@ Added stronger **generated meal diagnostics** and **meal fallback** behavior wit
 | `[candidate-pool] google_top_up` | Live Google top-up attempted/skipped; includes `skippedRestaurantFallback` (Phase C/C.1) |
 | `[candidate-pool] pool_generate_inputs` | Final in-memory pool counts passed to scheduler; includes `fromGlobalPool` (Phase C) |
 | `[candidate-pool] restaurant_meal_fallback` | General restaurant candidates added to meal pools before Google (Phase C.1) |
+| `[candidate-pool] postpass_pool_read` | Post-pass pool load for fill-sparse / ensure-meals (Phase C.2) |
+| `[fill-sparse] pool_candidates_used` | Saved pool candidates used for activity/meal top-up (Phase C.2) |
+| `[ensure-meals] pool_candidates_used` | Saved pool meal candidates used (Phase C.2) |
+| `[fill-sparse] live_fallback_skipped_pool_available` | Live Google skipped — saved pool or quota (Phase C.2) |
+| `[ensure-meals] live_fallback_skipped_pool_available` | Live Google skipped — saved pool or quota (Phase C.2) |
+| `[itinerary-generate] stored_place_hydration` | Pre-generate place hydration sources (Phase C.3) |
 
 **Assessment:** Meal fallback **improved** (breakfast/restaurants started appearing), but **did not fully solve itinerary quality** — especially under **Google Places quota exhaustion** (see below). Phase 1 used-marking semantics remain intact (`pushStop` → `markStopPlaceUsed`; no early `usedGoogleIds` in pickers).
 
@@ -358,18 +367,19 @@ Server logs showed repeated Google Places **`OVER_QUERY_LIMIT`** from meal searc
 
 ### Persistent candidate pools — architecture (target state)
 
-**Generate now reads from `destination_place_candidates` first (Phase C).** Live Google tops up only shortfalls. Phases D+ extend pool-first behavior to regenerate, refresh-suggestion, and post-passes.
+**Generate now reads from `destination_place_candidates` first (Phases C–C.3).** Live Google tops up only shortfalls. **`fill-sparse`** and **`ensure-meals`** are pool-first (Phase C.2). Phases D+ extend pool-first to regenerate and refresh-suggestion.
 
 | Principle | Intent |
 |-----------|--------|
 | **Google discovers inventory** | Use Places to build and refresh candidate inventory, not to schedule every stop on every run |
-| **Voyage generates from saved inventory** | Generate reads global pool first (Phase C ✓); regenerate, fill-sparse, refresh-suggestion should prefer stored candidates (Phase D+ / future) |
+| **Voyage generates from saved inventory** | Generate + post-passes read global pool first (Phase C ✓, C.2 ✓); regenerate / refresh-suggestion pool-first — Phase D/E (future) |
 | **Destination-level pool** | One Generate for a destination **creates or tops up** reusable pool rows (Phase B write-through) |
-| **Cross-trip reuse** | Users/trips to the same destination reuse the pool (Phase C ✓ for Generate) |
+| **Cross-trip reuse** | Users/trips to the same destination reuse the pool (Phase C ✓) |
+| **Stored-data-first hydration** | Trip places use DB + pool before live Details during Generate (Phase C.3 ✓) |
 | **Periodic refresh** | Refresh stale metadata on a schedule (e.g. ~2 weeks) — Phase F (future) |
 | **Regenerate / refresh-suggestion** | Trip deck → global pool → live Google fallback — Phases D/E (future) |
 | **Durable keys** | Store **`google_place_id`** as the stable key |
-| **No raw photo hoarding** | Global pool stores no photo URLs or raw photo bytes |
+| **No raw photo hoarding** | Global pool stores no photo URLs or raw photo bytes; no photo backfill during Generate |
 | **Quality gates** | Incomplete itineraries should not return normal success — future work |
 
 **Table roles:**
@@ -381,6 +391,37 @@ Server logs showed repeated Google Places **`OVER_QUERY_LIMIT`** from meal searc
 | **`trip_candidate_pool`** | Per-trip scheduler deck and placement state (Phase D+; schema exists, not wired yet). |
 
 See **`COST_SAFETY_CHECKPOINT.md`** for env flags and cost controls.
+
+---
+
+### Current state — pool-first / quota-safe Generate (Phases B′ through C.3)
+
+**Where we are:** Generate is now largely **saved-inventory-first** end-to-end for Barcelona and other destinations with a populated global pool. Live Google is a **fallback only**, gated per request.
+
+| Layer | Status | Key behavior |
+|-------|--------|--------------|
+| **Quota gate (B′)** | ✓ | Request-scoped; skips live Places after exhaustion |
+| **Schema + write-through (A/B)** | ✓ | `destination_place_candidates` populated; Barcelona pool = 135 active |
+| **Main Generate (C/C.1)** | ✓ | Reads global pool; restaurant meal fallback; zero live top-up when pool sufficient |
+| **Post-passes (C.2)** | ✓ | `fill-sparse` + `ensure-meals` read destination pool before live Google |
+| **Pre-generate hydration (C.3)** | ✓ | Stored DB → pool → live Details; no photo burst before `[itinerary-generate] start` |
+| **Trip deck (D)** | Not wired | `trip_candidate_pool` schema only |
+| **refresh-suggestion** | Not pool-first | Still live Google |
+
+**Barcelona controlled test (latest, post C/C.1/C.2):**
+
+- Main Generate: `fromGlobalPool: true`, `googleFetchedCounts: { interest: 0, restaurant: 0, parks: 0, experiences: 0, meals: 0 }`
+- Post-passes: `[candidate-pool] postpass_pool_read` with ~65 candidates per meal/restaurant pool
+- Missing meals reduced to **intentional excursion-day breakfast skip only** (Day 4 Montserrat)
+- Pre-C.3 issue: quota still hit **before** main generation from `enrichPlacesInBackground` → addressed in C.3
+
+**Remaining quality issues (not quota/architecture):**
+
+- Day 3 and Day 5 sometimes show **`low_sightseeing:1`**
+- Late-day meal failures when cursor is past the meal window or too many restaurant candidates are already used
+- Day 4 breakfast intentionally skipped on early Montserrat excursion (expected)
+
+**Recommended next step:** One controlled Generate after **Phase C.3** to confirm `[itinerary-generate] stored_place_hydration` and **no pre-start** `fetchPlaceDetails` / `fetchPlaceByGoogleId`.
 
 ---
 
@@ -456,7 +497,13 @@ See **`COST_SAFETY_CHECKPOINT.md`** for env flags and cost controls.
 - Combined pools (global first, live Google second) are passed to **`generateSmartItinerary`** — scheduler logic **mostly unchanged**.
 - Live Google results still **write through** to global pool (Phase B); quota-skipped fetches write nothing.
 - **`trip_candidate_pool` is not wired yet.**
-- **`fill-sparse`**, **`ensure-meals`**, and **`refresh-suggestion`** are **not** pool-first yet.
+- **`refresh-suggestion`** is **not** pool-first yet.
+- **`fill-sparse`** and **`ensure-meals`** are pool-first as of **Phase C.2** (see below).
+
+**Controlled test confirmed:**
+
+- `fromGlobalPool: true`
+- `googleFetchedCounts: { interest: 0, restaurant: 0, parks: 0, experiences: 0, meals: 0 }`
 
 **Diagnostics:**
 
@@ -544,42 +591,117 @@ The **Phase B′ quota gate** then skipped later live calls in that request. Log
 
 ---
 
-### Current expected next Generate behavior (Barcelona)
+### Phase C.2 — post-passes use destination pool (completed)
 
-If running **one more controlled Generate** on the Barcelona test trip:
+**Commit:** *Use destination pool in itinerary post-passes*
 
-- Should **read 135 global candidates first** (`[candidate-pool] pool_read`, `fromGlobalPool: true`).
-- Should log **`[candidate-pool] restaurant_meal_fallback`** (+2 per meal type from general restaurants).
-- Should **avoid live breakfast/lunch/dinner Google top-ups** when restaurant pool covers the gap.
-- May still top up **other categories** (interest, restaurant general, parks, experiences) only if post-pool counts are below threshold **and** quota is available.
-- **`fill-sparse` / `ensure-meals`** may still attempt live Google if quota allows — not pool-first yet.
-- **Test sparingly** — Generate can still use Places for shortfalls and post-passes.
+**Key files:**
+
+- `lib/itinerary/fill-sparse.ts` — pool-first activity and meal top-up
+- `lib/itinerary/ensure-meals.ts` — pool-first B/L/D insertion
+- `lib/itinerary/candidate-pool.ts` — `loadPostPassDestinationPool`, `gatherMealCandidatesForPostPass`
+
+**Behavior:**
+
+- **`fillSparseDaysForTrip`** and **`ensureTripMeals`** load saved destination pool before live Google.
+- Post-pass pools include: activity pool, restaurant pool, breakfast/lunch/dinner meal pools (with restaurant fallback from C.1).
+- Live fallback only when saved pool has no usable candidates **and** quota gate allows.
+- When quota exhausted, post-passes still use saved pool; live calls skipped (`live_fallback_skipped_pool_available`).
+- **`trip_candidate_pool` not wired.**
+
+**Controlled test confirmed:**
+
+- `[candidate-pool] postpass_pool_read` — e.g. `restaurantPool: 65`, `breakfastMealPool/lunchMealPool/dinnerMealPool: ~65` each
+- `[fill-sparse] pool_candidates_used`, `[ensure-meals] pool_candidates_used`
+- Missing meals dropped to **only intentional excursion-day breakfast skip**
+- No more repeated `fetchAlternativeSuggestion: restaurant` quota skips when saved restaurants exist
+
+**Diagnostics:**
+
+| Log | Purpose |
+|-----|---------|
+| `[candidate-pool] postpass_pool_read` | Post-pass pool load counts |
+| `[fill-sparse] pool_candidates_used` | Saved pool used for sparse-day repair |
+| `[ensure-meals] pool_candidates_used` | Saved pool used for meal insertion |
+| `[fill-sparse] live_fallback_skipped_pool_available` | Live Google skipped — pool or quota |
+| `[ensure-meals] live_fallback_skipped_pool_available` | Live Google skipped — pool or quota |
+
+---
+
+### Phase C.3 — Generate place hydration stored-data-first (completed)
+
+**Commit:** *Generate place hydration stored-data-first* (or equivalent)
+
+**Root cause found:**
+
+- **`enrichPlacesInBackground`** was called **before** `[itinerary-generate] start` in the Generate route.
+- It ran **`Promise.all`** across all trip places in parallel.
+- Called **`fetchPlaceDetails`** for every place missing opening hours.
+- Called **`resolvePlacePhoto`** → **`fetchPlaceByGoogleId`** for photo backfill.
+- **Photos are not needed for scheduling** but consumed quota before main generation began.
+- Logs showed `quota_exhausted { context: 'fetchPlaceDetails' }` before `[itinerary-generate] start`.
+
+**Fix:**
+
+- **Removed `enrichPlacesInBackground`** from the Generate route.
+- Added **`hydratePlacesForGenerate`** (`lib/itinerary/enrich-places.ts`).
+- Hydration order: **stored DB fields** → **`destination_place_candidates`** by `google_place_id` → live **`fetchPlaceDetails`** (quota-gated last resort).
+- **No photo fetches** during Generate.
+- **Sequential** hydration — no parallel burst, no retries.
+- Post-generate **`enrichPlacesOpeningHours`** also uses pool-first path when `trip` is passed.
+
+**Diagnostics:**
+
+| Log | Purpose |
+|-----|---------|
+| `[itinerary-generate] stored_place_hydration` | `fromStoredDb`, `fromDestinationPool`, `liveDetailsAttempted`, `skippedQuota`, `missingCoordinates` |
+
+---
+
+### Current expected next Generate test (after Phase C.3)
+
+Run **one controlled Generate** on the Barcelona test trip. Desired logs in order:
+
+1. `[itinerary-generate] stored_place_hydration`
+2. `[itinerary-generate] start`
+3. `[candidate-pool] pool_read`
+4. `[candidate-pool] pool_generate_inputs` with `fromGlobalPool: true`
+5. `[candidate-pool] postpass_pool_read` (post-passes)
+
+**Should NOT appear before `[itinerary-generate] start`:**
+
+- `fetchPlaceDetails`
+- `fetchPlaceByGoogleId` (photo backfill)
+
+Main Generate should still use the saved Barcelona pool with zero live top-up when sufficient. Post-passes should use saved pool. Any remaining live Google calls should be **true fallbacks only** and respect the quota gate.
+
+**Test sparingly** — do not repeatedly click Generate.
 
 ---
 
 ### Next planned phase options
 
-**Option A — Controlled validation (recommended next)**
+**Option A — Controlled C.3 validation (recommended next)**
 
-- Run **one controlled Generate** after Phase C.1 to confirm global pool read, `restaurant_meal_fallback` logs, and skipped meal top-ups.
-- Read server logs; do not repeatedly click Generate.
+- Run one Generate and verify `stored_place_hydration` + no pre-start details/photo burst.
+- Confirm main Generate and post-passes still pool-first.
 
-**Option B — Phase D: trip candidate deck**
+**Option B — Quality gate before replacing itinerary**
+
+- Prevent sparse/incomplete Generate results from replacing a better existing itinerary.
+- Ideally gate **before** delete/replace of existing itinerary rows.
+
+**Option C — Improve day density / low sightseeing**
+
+- Fix **`low_sightseeing:1`** on some days (e.g. Day 3, Day 5) — activity top-up gives up too early.
+- Improve late-day meal placement when cursor is past meal windows or brands are exhausted.
+
+**Option D — Phase D: trip candidate deck**
 
 - Wire **`trip_candidate_pool`**.
-- Snapshot candidates per trip; track available / placed / rejected / removed_by_user.
-- Regenerate from unused trip candidates first.
-- Refresh-suggestion uses unused trip candidates first.
-
-**Option C — Quality gate before wiping existing itinerary (Phase G)**
-
-- Prevent normal **200 success** when itinerary is severely incomplete.
-- Ideally move quality gate **before** deleting/replacing existing itinerary.
-
-**Option D — Pool-first fill-sparse / ensure-meals**
-
-- Make post-passes use destination/trip pools before live Google.
-- Further reduce Google usage after initial Generate.
+- Track available / placed / rejected / removed_by_user per trip.
+- Regenerate from unused trip-specific candidates first.
+- Refresh-suggestion from unused trip candidates first.
 
 **Still later (not immediate):**
 
@@ -604,7 +726,8 @@ Google results fetched during Generate are **passively cached** into destination
 **Behavior (unchanged for scheduling):**
 
 - Generate **still uses the same in-memory pools** passed to `generateSmartItinerary`.
-- **`smart-generate`**, **`fill-sparse`**, **`ensure-meals`**, **`refresh-suggestion`** do **not** read from persistent pool yet.
+- **`smart-generate`** and **`refresh-suggestion`** do **not** read from persistent pool yet.
+- **`fill-sparse`** / **`ensure-meals`** are pool-first as of Phase C.2.
 - Cache write failures are **non-blocking** — log `[candidate-pool] upsert_failed` and continue Generate.
 - **No extra Google calls** added; quota-skipped fetches produce nothing to cache.
 - **No photo URLs or raw photos** stored in global pool.
@@ -648,12 +771,13 @@ Google results fetched during Generate are **passively cached** into destination
 
 ### Active — itinerary builder
 
-- **Controlled validation after Phase C.1 (recommended next)** — one Generate on Barcelona to confirm pool read, `restaurant_meal_fallback`, and skipped meal top-ups. See §8 next phase options.
-- **Itinerary quality still not fully fixed** — day rhythm/density gaps remain; pool-first Generate reduces quota dependence but quality gates and post-passes still need work.
-- **Day rhythm / density not guaranteed** — Phase 1.5 improved meals but days can still collapse to breakfast + one activity; `topUpSparseDay` activity repair gives up too early; no full-day density gate.
-- **Quota amplification (partially addressed)** — Phase B′ short-circuits live Places after quota exhaustion within a Generate request; Phase C/C.1 reduce initial live fetch volume. Pool-first for **`fill-sparse` / `ensure-meals`** remains future work (Option D).
-- **Success response vs quality** — HTTP 200 + “Itinerary ready!” even when `missing_meals_after_generation` shows most days incomplete; full quality gate before wipe remains Phase G / Option C.
+- **Controlled C.3 validation (recommended next)** — one Generate on Barcelona; confirm `stored_place_hydration`, no pre-start `fetchPlaceDetails`/`fetchPlaceByGoogleId`, pool-first main + post-passes. See §8.
+- **Itinerary quality still not fully fixed** — `low_sightseeing:1` on some days; late-day meal placement gaps; excursion-day breakfast skip is intentional.
+- **Day rhythm / density not guaranteed** — activity top-up gives up too early; no full-day density gate (Option C).
+- **Quota amplification (largely addressed)** — B′ gate + C/C.1/C.2/C.3 reduce live Places volume; pre-generate photo/details burst removed.
+- **Success response vs quality** — HTTP 200 + “Itinerary ready!” even when days are sparse; quality gate before wipe remains Option B.
 - **Trip deck / regenerate / refresh from saved candidates** — Phase D/E (future); `trip_candidate_pool` schema exists but is not wired.
+- **refresh-suggestion** — not pool-first yet.
 - **Optional home base** — Generate currently requires a saved hotel; future phase.
 - **Neighborhood / day clustering** — future phase.
 
@@ -663,7 +787,7 @@ Google results fetched during Generate are **passively cached** into destination
 - **Lazy-load Maps JavaScript** — reduce automatic map load cost (TripMap + hotel explore both load Maps JS).
 - **Live hotel pricing** — requires real provider/booking API before nightly filters (see §7).
 - **Discover photos** — should respect photo-disable/proxy behavior (currently direct Google photo URLs in UI).
-- **Caching / rate limiting** — Phase B write-through populates global pool; Phase C/C.1 read it first on Generate. Consider rate limits on autocomplete/search routes.
+- **Caching / rate limiting** — Phase B write-through populates global pool; Phases C–C.3 read it first on Generate and post-passes. Consider rate limits on autocomplete/search routes.
 - **DB-level unique trip-name index** — after cleaning any existing duplicate names per user.
 - **Dev banner** — surface when cost-safety or mock flags are active.
 - **Directions routes** — dormant API routes still exist; consider hard-gating or removal.
@@ -681,9 +805,10 @@ Google results fetched during Generate are **passively cached** into destination
 6. When quota is exhausted: enable cost flags + mock modes (`NEXT_PUBLIC_USE_MOCK_HOTEL_EXPLORE`, `NEXT_PUBLIC_USE_MOCK_DESTINATION_AUTOCOMPLETE`).
 7. **Never commit `.env.local`.** Includes `SUPABASE_SERVICE_ROLE_KEY` for pool read/write-through (present locally for dev).
 8. Restart `npm run dev` after changing `NEXT_PUBLIC_*` env vars.
-9. **Do not repeatedly click Generate** — one controlled test at a time; Generate can still call live Places for shortfalls and post-passes.
+9. **Do not repeatedly click Generate** — one controlled test at a time; Generate can still call live Places for true shortfalls only.
 10. **No Google Directions API** — Plan travel times use local estimates only.
 11. **No automatic Places calls on page load** — pool refresh must be scheduled/admin-controlled later, not page-load based.
+12. **No photo backfill during Generate** — scheduling does not need photos; do not re-add `enrichPlacesInBackground` to the Generate route.
 
 ---
 
@@ -702,9 +827,10 @@ lib/map/fit-bounds.ts                     — Map bounds incl. destination cente
 supabase/migrations/007_trip_destination_coords.sql — destination_lat/lng columns
 supabase/migrations/008_candidate_pools.sql     — destinations, destination_place_candidates, trip_candidate_pool
 lib/itinerary/places-quota-gate.ts              — request-scoped Places quota gate (Phase B′)
-lib/itinerary/candidate-pool.ts                 — global pool read/write, meal fallback, write-through (Phase B/C/C.1)
+lib/itinerary/candidate-pool.ts                 — global pool read/write, post-pass pools, meal fallback (Phase B/C)
+lib/itinerary/enrich-places.ts                  — stored-data-first hydration (Phase C.3)
 lib/itinerary/pool-tags.ts                      — pool tag mapping for cached candidates
-lib/supabase/service.ts                         — service-role client for global pool writes
+lib/supabase/service.ts                         — service-role client for global pool reads/writes
 components/trip/hotel-section.tsx       — Hotel tab states, explore entry, save, trip-date defaults
 components/trip/hotel-explore-panel.tsx — Explore list/map, filters, pins
 components/trip/trip-dashboard.tsx      — Trip props, hides side map during hotel explore
@@ -718,8 +844,8 @@ lib/itinerary/smart-generate.ts         — Day scheduler (meals, activities, ma
 lib/itinerary/generate-diagnostics.ts   — Generate pool/day server logs
 lib/itinerary/reschedule-day.ts         — Time chaining, rest intervals, chronological sort_order
 lib/itinerary/apply-reschedule.ts       — Per-day / trip-wide reschedule DB updates
-lib/itinerary/fill-sparse.ts            — Sparse-day top-up after Generate
-lib/itinerary/ensure-meals.ts           — Last-resort B/L/D insertion after Generate
+lib/itinerary/fill-sparse.ts            — Sparse-day top-up; pool-first (Phase C.2)
+lib/itinerary/ensure-meals.ts           — Last-resort B/L/D insertion; pool-first (Phase C.2)
 lib/itinerary/meal-slots.ts             — Meal insertion bounds, dedup rules
 lib/itinerary/meal-locations.ts         — Meal search location, excursion helpers
 components/trip/itinerary-section.tsx   — Plan UI, Generate handler, meal warning toast
