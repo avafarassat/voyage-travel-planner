@@ -94,7 +94,7 @@ function mapResults(
     address: place.formatted_address ?? place.vicinity ?? "",
     lat: place.geometry.location.lat,
     lng: place.geometry.location.lng,
-    category: googleTypeToCategory(place.types ?? []),
+    category: googleTypeToCategory(place.types ?? [], place.name),
     photoUrl:
       includePhotos && place.photos?.[0]
         ? `https://maps.googleapis.com/maps/api/place/photo?maxwidth=400&photo_reference=${place.photos[0].photo_reference}&key=${apiKey}`

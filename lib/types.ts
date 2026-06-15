@@ -1,3 +1,5 @@
+import { googleTypesToPlaceCategory } from "@/lib/itinerary/visible-category";
+
 export type PlaceCategory =
   | "restaurant"
   | "bar"
@@ -321,20 +323,8 @@ export function getCategoryStyle(category: PlaceCategory) {
   return PLACE_CATEGORIES.find((c) => c.value === category) ?? PLACE_CATEGORIES[0];
 }
 
-export function googleTypeToCategory(types: string[]): PlaceCategory {
-  if (types.includes("restaurant") || types.includes("food")) return "restaurant";
-  if (types.includes("night_club")) return "nightlife";
-  if (types.includes("bar")) return "bar";
-  if (types.includes("museum")) return "museum";
-  if (types.includes("tourist_attraction")) return "monument";
-  if (
-    types.some((t) =>
-      ["park", "natural_feature", "campground", "national_park", "hiking_area"].includes(t)
-    )
-  ) {
-    return "activity";
-  }
-  return "activity";
+export function googleTypeToCategory(types: string[], name = ""): PlaceCategory {
+  return googleTypesToPlaceCategory(types, name);
 }
 
 /** True for parks, gardens, beaches, and other outdoor/nature spots. */

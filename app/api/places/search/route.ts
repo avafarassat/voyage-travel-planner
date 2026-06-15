@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import type { PlaceCategory } from "@/lib/types";
+import { googleTypeToCategory, type PlaceCategory } from "@/lib/types";
 
 const CATEGORY_TYPES: Record<PlaceCategory, string> = {
   restaurant: "restaurant",
@@ -9,15 +9,6 @@ const CATEGORY_TYPES: Record<PlaceCategory, string> = {
   monument: "tourist_attraction",
   museum: "museum",
 };
-
-function mapTypesToCategory(types: string[]): PlaceCategory {
-  if (types.includes("restaurant") || types.includes("food")) return "restaurant";
-  if (types.includes("night_club")) return "nightlife";
-  if (types.includes("bar")) return "bar";
-  if (types.includes("museum")) return "museum";
-  if (types.includes("tourist_attraction")) return "monument";
-  return "activity";
-}
 
 export async function GET(request: NextRequest) {
   const lat = request.nextUrl.searchParams.get("lat");
@@ -57,7 +48,7 @@ export async function GET(request: NextRequest) {
       lat: place.geometry.location.lat,
       lng: place.geometry.location.lng,
       rating: place.rating,
-      category: mapTypesToCategory(place.types),
+      category: googleTypeToCategory(place.types, place.name),
       photoUrl: place.photos?.[0]
         ? `https://maps.googleapis.com/maps/api/place/photo?maxwidth=400&photo_reference=${place.photos[0].photo_reference}&key=${apiKey}`
         : undefined,
@@ -96,7 +87,7 @@ export async function GET(request: NextRequest) {
     lat: place.geometry.location.lat,
     lng: place.geometry.location.lng,
     rating: place.rating,
-    category: mapTypesToCategory(place.types),
+    category: googleTypeToCategory(place.types, place.name),
     photoUrl: place.photos?.[0]
       ? `https://maps.googleapis.com/maps/api/place/photo?maxwidth=400&photo_reference=${place.photos[0].photo_reference}&key=${apiKey}`
       : undefined,
@@ -147,7 +138,7 @@ export async function POST(request: NextRequest) {
       lat: place.geometry.location.lat,
       lng: place.geometry.location.lng,
       rating: place.rating,
-      category: mapTypesToCategory(place.types),
+      category: googleTypeToCategory(place.types, place.name),
       photoUrl: place.photos?.[0]
         ? `https://maps.googleapis.com/maps/api/place/photo?maxwidth=400&photo_reference=${place.photos[0].photo_reference}&key=${apiKey}`
         : undefined,
@@ -186,7 +177,7 @@ export async function POST(request: NextRequest) {
     lat: place.geometry.location.lat,
     lng: place.geometry.location.lng,
     rating: place.rating,
-    category: mapTypesToCategory(place.types),
+    category: googleTypeToCategory(place.types, place.name),
     photoUrl: place.photos?.[0]
       ? `https://maps.googleapis.com/maps/api/place/photo?maxwidth=400&photo_reference=${place.photos[0].photo_reference}&key=${apiKey}`
       : undefined,

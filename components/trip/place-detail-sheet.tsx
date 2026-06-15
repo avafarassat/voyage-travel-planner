@@ -9,7 +9,8 @@ import {
 } from "@/components/ui/dialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { getCategoryStyle, type OpeningHours, type Place } from "@/lib/types";
+import { getPlaceDisplayStyle } from "@/lib/itinerary/visible-category";
+import { type OpeningHours, type Place } from "@/lib/types";
 import { ExternalLink, Loader2, Star } from "lucide-react";
 
 const PLACE_PHOTO_PROXY_DISABLED =
@@ -124,7 +125,9 @@ export function PlaceDetailSheet({ place, open, onOpenChange }: PlaceDetailSheet
     };
   }, [open, place]);
 
-  const catStyle = place ? getCategoryStyle(place.category) : null;
+  const catStyle = place
+    ? getPlaceDisplayStyle({ name: place.name, category: place.category })
+    : null;
 
   const displayName = detail?.name ?? place?.name ?? "Place details";
   const displayAddress = detail?.address ?? place?.address;

@@ -19,7 +19,8 @@ import { PlaceAutocompleteInput } from "@/components/trip/place-autocomplete-inp
 import { PlaceReservationFields } from "@/components/trip/place-reservation-fields";
 import { toast } from "@/components/ui/use-toast";
 import { formatDate, formatTime, placeHasReservation, cn } from "@/lib/utils";
-import { PLACE_CATEGORIES, getCategoryStyle, type Place, type PlaceCategory } from "@/lib/types";
+import { getPlaceDisplayStyle } from "@/lib/itinerary/visible-category";
+import { PLACE_CATEGORIES, type Place, type PlaceCategory } from "@/lib/types";
 
 interface PlacesSectionProps {
   tripId: string;
@@ -388,7 +389,7 @@ export function PlacesSection({
           <p className="text-sm text-muted-foreground">No places saved yet.</p>
         ) : (
           places.map((place) => {
-            const style = getCategoryStyle(place.category);
+            const style = getPlaceDisplayStyle({ name: place.name, category: place.category });
             const isSelected = selectedPlaceId === place.id;
             const reserved = placeHasReservation(place);
             return (
@@ -427,7 +428,7 @@ export function PlacesSection({
                           </Badge>
                         )}
                       </div>
-                      <p className="text-xs capitalize text-muted-foreground">{place.category}</p>
+                      <p className="text-xs text-muted-foreground">{style.label}</p>
                     </div>
                   </div>
                   {!readOnly && (

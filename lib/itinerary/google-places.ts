@@ -70,7 +70,7 @@ function mapLegacyPlace(place: {
     lat: place.geometry.location.lat,
     lng: place.geometry.location.lng,
     rating: place.rating,
-    category: googleTypeToCategory(place.types),
+    category: googleTypeToCategory(place.types, place.name),
     photoUrl: place.photos?.[0]
       ? `https://maps.googleapis.com/maps/api/place/photo?maxwidth=400&photo_reference=${place.photos[0].photo_reference}&key=${apiKey}`
       : undefined,

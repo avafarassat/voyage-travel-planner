@@ -65,7 +65,7 @@ export function DiscoverSection({ tripId, hotel, onUpdate }: DiscoverSectionProp
       address: result.address,
       lat: result.lat,
       lng: result.lng,
-      category: googleTypeToCategory(result.types) || category,
+      category: googleTypeToCategory(result.types, result.name) || category,
       source: "suggested",
       google_place_id: result.placeId,
       rating: result.rating ?? null,

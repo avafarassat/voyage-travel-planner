@@ -1,4 +1,5 @@
 import type { PlaceCategory, PlaceSearchResult } from "@/lib/types";
+import { googleTypeToCategory } from "@/lib/types";
 
 const CATEGORY_TO_GOOGLE_TYPE: Record<PlaceCategory, string> = {
   restaurant: "restaurant",
@@ -9,15 +10,7 @@ const CATEGORY_TO_GOOGLE_TYPE: Record<PlaceCategory, string> = {
   museum: "museum",
 };
 
-export function googleTypeToCategory(types: string[]): PlaceCategory {
-  if (types.includes("restaurant") || types.includes("food")) return "restaurant";
-  if (types.includes("night_club")) return "nightlife";
-  if (types.includes("bar")) return "bar";
-  if (types.includes("museum") || types.includes("art_gallery")) return "museum";
-  if (types.includes("tourist_attraction") || types.includes("church"))
-    return "monument";
-  return "activity";
-}
+export { googleTypeToCategory };
 
 export function getGooglePlaceType(category: PlaceCategory): string {
   return CATEGORY_TO_GOOGLE_TYPE[category];

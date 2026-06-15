@@ -10,6 +10,11 @@ import {
   candidateMatchesInterest,
   type InterestCandidate,
 } from "@/lib/itinerary/interest-scheduling";
+import {
+  resolveVisibleItineraryCategory,
+  visibleCategoryToPlaceCategory,
+  visibleCategoryToPoolTags,
+} from "@/lib/itinerary/visible-category";
 
 export type PoolDiscoverySource =
   | "interest_search"
@@ -82,7 +87,7 @@ export function interestTagsForResult(
   const types = result.types ?? [];
   const candidate: InterestCandidate = {
     name: result.name,
-    category: result.category ?? googleTypeToCategory(types),
+    category: result.category ?? googleTypeToCategory(types, result.name),
     outdoor: isParkOrNaturePlace(types, result.name),
     experience: isExperienceActivity(types, result.name),
   };
@@ -108,7 +113,6 @@ export function mapGoogleResultToPoolCandidate(
 ): MappedPoolCandidate {
   const types = result.types ?? [];
   const name = result.name;
-  const primary_category = result.category ?? googleTypeToCategory(types);
   const tags = new Set<PoolTag>();
 
   for (const tag of options.extraTags ?? []) tags.add(tag);
@@ -133,15 +137,23 @@ export function mapGoogleResultToPoolCandidate(
       break;
   }
 
-  if (primary_category === "museum") tags.add("museum");
-  if (primary_category === "monument") tags.add("monument");
-  if (primary_category === "bar") tags.add("bar");
-  if (primary_category === "nightlife") tags.add("nightlife");
-  if (primary_category === "restaurant" && !options.mealType) tags.add("restaurant");
-
   const is_experience = isExperienceActivity(types, name);
   const is_park_nature = isParkOrNaturePlace(types, name);
   const is_sit_down_restaurant = isSitDownRestaurant(name, types);
+
+  const visible = resolveVisibleItineraryCategory({
+    name,
+    googleTypes: types,
+    poolTags: [...tags],
+    isParkNature: is_park_nature,
+    isExperience: is_experience,
+  });
+  const primary_category = visibleCategoryToPlaceCategory(visible);
+  for (const tag of visibleCategoryToPoolTags(visible)) tags.add(tag);
+
+  if (primary_category === "bar") tags.add("bar");
+  if (primary_category === "nightlife") tags.add("nightlife");
+  if (primary_category === "restaurant" && !options.mealType) tags.add("restaurant");
 
   return {
     google_place_id: result.placeId,

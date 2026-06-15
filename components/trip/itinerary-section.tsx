@@ -40,6 +40,7 @@ import {
 import { toast } from "@/components/ui/use-toast";
 import { formatDate, formatTime, placeHasReservation, pinnedStopScheduledTime, cn } from "@/lib/utils";
 import { getSuggestionExcludeGoogleIds } from "@/lib/itinerary/suggestion-exclusions";
+import { getPlaceDisplayStyle } from "@/lib/itinerary/visible-category";
 import {
   getCategoryStyle,
   PLACE_CATEGORIES,
@@ -262,7 +263,9 @@ function SortableStop({
 
   const isRest = stop.stop_type === "rest";
   const place = stop.place;
-  const catStyle = place ? getCategoryStyle(place.category) : null;
+  const catStyle = place
+    ? getPlaceDisplayStyle({ name: place.name, category: place.category })
+    : null;
   const suggested = isSuggestedStop(stop);
   const [refreshing, setRefreshing] = useState(false);
   const [removing, setRemoving] = useState(false);
@@ -432,7 +435,7 @@ function SortableStop({
               </>
             ) : (
               <>
-                {place && <span className="capitalize">{place.category}</span>}
+                {place && <span>{catStyle?.label ?? place.category}</span>}
                 <span className="ml-1">
                   · {stop.duration_minutes ?? 60} min
                   {displayTime && ` · ${formatTime(displayTime)}`}
@@ -1379,7 +1382,7 @@ export function ItinerarySection({
                   <SelectContent>
                     {placesNotOnDay.map((p) => (
                       <SelectItem key={p.id} value={p.id}>
-                        {getCategoryStyle(p.category).emoji} {p.name}
+                        {getPlaceDisplayStyle({ name: p.name, category: p.category }).emoji} {p.name}
                       </SelectItem>
                     ))}
                   </SelectContent>

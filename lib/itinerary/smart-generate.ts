@@ -155,7 +155,7 @@ export function toSuggestedInput(result) {
         lat: result.lat,
         lng: result.lng,
         rating: result.rating,
-        category: result.category ?? googleTypeToCategory(types),
+        category: result.category ?? googleTypeToCategory(types, result.name),
         photoUrl: result.photoUrl,
         openingHours: result.openingHours ?? null,
         outdoor: isParkOrNaturePlace(types, result.name),

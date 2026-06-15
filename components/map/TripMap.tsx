@@ -11,8 +11,8 @@ import { MapLegend } from "@/components/map/map-legend";
 import { MUTED_MAP_STYLES } from "@/lib/map/map-styles";
 import { fitMapToContent } from "@/lib/map/fit-bounds";
 import { createHotelPinIcon, createPlacePinIcon } from "@/lib/map/pin-icons";
+import { getPlaceDisplayStyle, visibleCategoryToPinCategory } from "@/lib/itinerary/visible-category";
 import type { Hotel, Place } from "@/lib/types";
-import { getCategoryStyle } from "@/lib/types";
 import { formatPlaceReservation, placeHasReservation } from "@/lib/utils";
 
 const mapContainerStyle = { width: "100%", height: "100%" };
@@ -173,13 +173,14 @@ export function TripMap({
 
         {places.map((place) => {
           if (!Number.isFinite(place.lat) || !Number.isFinite(place.lng)) return null;
-          const style = getCategoryStyle(place.category);
+          const style = getPlaceDisplayStyle({ name: place.name, category: place.category });
+          const pinCategory = visibleCategoryToPinCategory(style.value);
           const isSelected = selectedPlaceId === place.id;
           return (
             <Marker
               key={place.id}
               position={{ lat: place.lat, lng: place.lng }}
-              icon={createPlacePinIcon(style.color, place.category, zoom)}
+              icon={createPlacePinIcon(style.color, pinCategory, zoom)}
               opacity={isSelected ? 1 : selectedPlaceId ? 0.55 : 0.9}
               zIndex={isSelected ? 1000 : 1}
               onClick={() => {
