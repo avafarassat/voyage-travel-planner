@@ -18,6 +18,7 @@ import {
   USE_MOCK_HOTEL_EXPLORE,
   friendlyHotelSearchError,
   getMockHotelExploreResults,
+  MOCK_HOTEL_DESTINATION_EMPTY_MESSAGE,
 } from "@/lib/maps/mock-hotel-explore";
 import { toast } from "@/components/ui/use-toast";
 import { formatDate } from "@/lib/utils";
@@ -88,7 +89,7 @@ export function HotelSection({
       const mockResults = getMockHotelExploreResults(displayQuery, city, country);
       setExploreResults(mockResults);
       if (mockResults.length === 0) {
-        setExploreError("No hotels found — try a different search.");
+        setExploreError(MOCK_HOTEL_DESTINATION_EMPTY_MESSAGE);
       }
       setExploreLoading(false);
       return;

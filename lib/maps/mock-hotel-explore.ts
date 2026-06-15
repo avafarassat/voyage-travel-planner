@@ -7,6 +7,11 @@ export const USE_MOCK_HOTEL_EXPLORE =
 export const HOTEL_SEARCH_UNAVAILABLE_MESSAGE =
   "Hotel search is temporarily unavailable. You can still enter your hotel manually.";
 
+export const MOCK_HOTEL_DESTINATION_EMPTY_MESSAGE =
+  "No mock hotels are available for this destination. You can still enter your hotel manually.";
+
+type MockDestinationKey = "barcelona" | "lake-como" | "unknown";
+
 const MOCK_BARCELONA_HOTELS: HotelExploreResult[] = [
   {
     placeId: "mock-hotel-arts-barcelona",
@@ -60,7 +65,87 @@ const MOCK_BARCELONA_HOTELS: HotelExploreResult[] = [
   },
 ];
 
+const MOCK_LAKE_COMO_HOTELS: HotelExploreResult[] = [
+  {
+    placeId: "mock-hotel-grand-tremezzo",
+    name: "Grand Hotel Tremezzo",
+    address: "Via Regina, 8, 22016 Tremezzina, Lake Como, Italy",
+    lat: 45.9839,
+    lng: 9.2165,
+    rating: 4.8,
+    userRatingsTotal: 3120,
+    priceLevel: 4,
+  },
+  {
+    placeId: "mock-hotel-passalacqua",
+    name: "Passalacqua",
+    address: "Via Girolamo Sacchi, 8, 22020 Moltrasio, Lake Como, Italy",
+    lat: 45.8647,
+    lng: 9.1036,
+    rating: 4.9,
+    userRatingsTotal: 842,
+    priceLevel: 4,
+  },
+  {
+    placeId: "mock-hotel-mandarin-oriental-como",
+    name: "Mandarin Oriental, Lago di Como",
+    address: "Via Monte Grappa, 8, 22020 Blevio, Lake Como, Italy",
+    lat: 45.8533,
+    lng: 9.1206,
+    rating: 4.7,
+    userRatingsTotal: 1564,
+    priceLevel: 4,
+  },
+  {
+    placeId: "mock-hotel-villa-deste",
+    name: "Villa d'Este",
+    address: "Via Regina, 40, 22012 Cernobbio, Lake Como, Italy",
+    lat: 45.8253,
+    lng: 9.0767,
+    rating: 4.8,
+    userRatingsTotal: 2891,
+    priceLevel: 4,
+  },
+  {
+    placeId: "mock-hotel-hilton-lake-como",
+    name: "Hilton Lake Como",
+    address: "Via Borgo Vico, 241, 22100 Como, Lake Como, Italy",
+    lat: 45.8097,
+    lng: 9.0752,
+    rating: 4.5,
+    userRatingsTotal: 4210,
+    priceLevel: 3,
+  },
+];
+
+const MOCK_HOTELS_BY_DESTINATION: Record<MockDestinationKey, HotelExploreResult[]> = {
+  barcelona: MOCK_BARCELONA_HOTELS,
+  "lake-como": MOCK_LAKE_COMO_HOTELS,
+  unknown: [],
+};
+
 const STOP_WORDS = new Set(["hotels", "hotel", "in", "the", "near", "and", "for"]);
+
+function resolveMockDestinationKey(city: string, country?: string | null): MockDestinationKey {
+  const cityLower = city.trim().toLowerCase();
+  const countryLower = (country ?? "").trim().toLowerCase();
+  const combined = `${cityLower} ${countryLower}`;
+
+  if (
+    combined.includes("lake como") ||
+    combined.includes("lago di como") ||
+    (cityLower.includes("como") &&
+      (countryLower.includes("ital") || combined.includes("lombard")))
+  ) {
+    return "lake-como";
+  }
+
+  if (combined.includes("barcelona") || combined.includes("catalonia")) {
+    return "barcelona";
+  }
+
+  return "unknown";
+}
 
 export function friendlyHotelSearchError(raw?: string | null): string {
   if (!raw?.trim()) return HOTEL_SEARCH_UNAVAILABLE_MESSAGE;
@@ -68,6 +153,7 @@ export function friendlyHotelSearchError(raw?: string | null): string {
   const lower = raw.toLowerCase();
 
   if (lower.includes("no hotels found")) return raw;
+  if (lower.includes("no mock hotels are available")) return raw;
   if (lower.includes("could not search") || lower.includes("check your connection")) {
     return raw;
   }
@@ -98,18 +184,23 @@ export function getMockHotelExploreResults(
   city: string,
   country?: string | null
 ): HotelExploreResult[] {
+  const destinationHotels =
+    MOCK_HOTELS_BY_DESTINATION[resolveMockDestinationKey(city, country)] ?? [];
+
+  if (destinationHotels.length === 0) return [];
+
   const apiQuery = queryForHotelSearch(displayQuery, city, country).toLowerCase();
   const terms = apiQuery
     .split(/\s+/)
     .map((term) => term.trim())
     .filter((term) => term.length > 2 && !STOP_WORDS.has(term));
 
-  if (terms.length === 0) return MOCK_BARCELONA_HOTELS;
+  if (terms.length === 0) return destinationHotels;
 
-  const filtered = MOCK_BARCELONA_HOTELS.filter((hotel) => {
+  const filtered = destinationHotels.filter((hotel) => {
     const haystack = `${hotel.name} ${hotel.address}`.toLowerCase();
     return terms.every((term) => haystack.includes(term));
   });
 
-  return filtered.length > 0 ? filtered : MOCK_BARCELONA_HOTELS;
+  return filtered.length > 0 ? filtered : destinationHotels;
 }
