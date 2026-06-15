@@ -22,10 +22,43 @@ import {
 
 type CountrySource = "empty" | "auto" | "manual";
 
+type DestinationCoords = { lat: number; lng: number };
+
+async function resolveDestinationCoords(
+  coords: DestinationCoords | null,
+  city: string,
+  country: string
+): Promise<DestinationCoords | null> {
+  if (
+    coords &&
+    Number.isFinite(coords.lat) &&
+    Number.isFinite(coords.lng)
+  ) {
+    return coords;
+  }
+
+  const address = [city, country].filter(Boolean).join(", ");
+  if (!address.trim()) return null;
+
+  try {
+    const geoRes = await fetch(`/api/geocode?address=${encodeURIComponent(address)}`);
+    if (!geoRes.ok) return null;
+    const geo = (await geoRes.json()) as { lat?: number; lng?: number };
+    if (Number.isFinite(geo.lat) && Number.isFinite(geo.lng)) {
+      return { lat: geo.lat!, lng: geo.lng! };
+    }
+  } catch {
+    // Optional fallback — trip still creates without map center coords
+  }
+
+  return null;
+}
+
 export default function NewTripPage() {
   const router = useRouter();
   const [loading, setLoading] = useState(false);
   const [destinationInput, setDestinationInput] = useState("");
+  const [destinationCoords, setDestinationCoords] = useState<DestinationCoords | null>(null);
   const countrySourceRef = useRef<CountrySource>("empty");
   const [form, setForm] = useState({
     name: "",
@@ -37,6 +70,7 @@ export default function NewTripPage() {
 
   function handleDestinationChange(value: string) {
     setDestinationInput(value);
+    setDestinationCoords(null);
     setForm((prev) => ({
       ...prev,
       city: value,
@@ -107,6 +141,12 @@ export default function NewTripPage() {
       // Cover image is optional — fall back to gradient
     }
 
+    const resolvedCoords = await resolveDestinationCoords(
+      destinationCoords,
+      form.city,
+      form.country
+    );
+
     const { data, error } = await supabase
       .from("trips")
       .insert({
@@ -114,6 +154,8 @@ export default function NewTripPage() {
         name: form.name,
         city: form.city,
         country: form.country || null,
+        destination_lat: resolvedCoords?.lat ?? null,
+        destination_lng: resolvedCoords?.lng ?? null,
         start_date: form.start_date,
         end_date: form.end_date,
         cover_image_url: coverImageUrl,
@@ -166,6 +208,7 @@ export default function NewTripPage() {
                     );
 
                     setDestinationInput(city);
+                    setDestinationCoords({ lat: selection.lat, lng: selection.lng });
                     countrySourceRef.current = "auto";
                     setForm((prev) => {
                       const next = {
@@ -199,7 +242,10 @@ export default function NewTripPage() {
                   id="city"
                   placeholder="Barcelona"
                   value={form.city}
-                  onChange={(e) => setForm({ ...form, city: e.target.value })}
+                  onChange={(e) => {
+                    setDestinationCoords(null);
+                    setForm({ ...form, city: e.target.value });
+                  }}
                   required
                 />
               </div>

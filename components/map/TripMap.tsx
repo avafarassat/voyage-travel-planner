@@ -20,6 +20,7 @@ const mapContainerStyle = { width: "100%", height: "100%" };
 interface TripMapProps {
   hotel: Hotel | null;
   places: Place[];
+  destinationCenter?: { lat: number; lng: number } | null;
   selectedPlaceId?: string | null;
   onSelectPlace?: (placeId: string | null) => void;
   onDeletePlace?: (placeId: string) => void;
@@ -29,6 +30,7 @@ interface TripMapProps {
 export function TripMap({
   hotel,
   places,
+  destinationCenter = null,
   selectedPlaceId,
   onSelectPlace,
   onDeletePlace,
@@ -48,8 +50,9 @@ export function TripMap({
   const center = useMemo(() => {
     if (hotel) return { lat: hotel.lat, lng: hotel.lng };
     if (places.length > 0) return { lat: places[0].lat, lng: places[0].lng };
+    if (destinationCenter) return destinationCenter;
     return { lat: 41.3874, lng: 2.1686 };
-  }, [hotel, places]);
+  }, [hotel, places, destinationCenter]);
 
   const hotelIcon = useMemo(
     () => (isLoaded ? createHotelPinIcon(zoom) : undefined),
@@ -58,9 +61,9 @@ export function TripMap({
 
   const fitMapToContentCallback = useCallback(
     (map: google.maps.Map) => {
-      fitMapToContent(map, hotel, places);
+      fitMapToContent(map, hotel, places, 48, destinationCenter);
     },
-    [hotel, places]
+    [hotel, places, destinationCenter]
   );
 
   const onLoad = useCallback(

@@ -4,13 +4,21 @@ import type { Hotel, Place } from "@/lib/types";
 /** Build map bounds from the main place cluster, skipping geographic outliers. */
 export function boundsForMapContent(
   hotel: Hotel | null,
-  places: Place[]
+  places: Place[],
+  destinationCenter?: { lat: number; lng: number } | null
 ): google.maps.LatLngBounds | null {
   if (places.length === 0) {
-    if (!hotel) return null;
-    const bounds = new google.maps.LatLngBounds();
-    bounds.extend({ lat: hotel.lat, lng: hotel.lng });
-    return bounds;
+    if (hotel) {
+      const bounds = new google.maps.LatLngBounds();
+      bounds.extend({ lat: hotel.lat, lng: hotel.lng });
+      return bounds;
+    }
+    if (destinationCenter) {
+      const bounds = new google.maps.LatLngBounds();
+      bounds.extend(destinationCenter);
+      return bounds;
+    }
+    return null;
   }
 
   const centroid = {
@@ -56,9 +64,16 @@ export function fitMapToContent(
   map: google.maps.Map,
   hotel: Hotel | null,
   places: Place[],
-  padding = 48
+  padding = 48,
+  destinationCenter?: { lat: number; lng: number } | null
 ): void {
-  const bounds = boundsForMapContent(hotel, places);
+  if (!hotel && places.length === 0 && destinationCenter) {
+    map.setCenter(destinationCenter);
+    map.setZoom(11);
+    return;
+  }
+
+  const bounds = boundsForMapContent(hotel, places, destinationCenter);
   if (!bounds || bounds.isEmpty()) return;
 
   map.fitBounds(bounds, padding);

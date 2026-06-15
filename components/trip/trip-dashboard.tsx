@@ -66,6 +66,18 @@ export function TripDashboard({
     [places]
   );
 
+  const destinationCenter = useMemo(() => {
+    if (
+      trip.destination_lat != null &&
+      trip.destination_lng != null &&
+      Number.isFinite(trip.destination_lat) &&
+      Number.isFinite(trip.destination_lng)
+    ) {
+      return { lat: trip.destination_lat, lng: trip.destination_lng };
+    }
+    return null;
+  }, [trip.destination_lat, trip.destination_lng]);
+
   const refresh = useCallback(() => {
     router.refresh();
   }, [router]);
@@ -91,6 +103,7 @@ export function TripDashboard({
     <TripMap
       hotel={hotel}
       places={manualPlaces}
+      destinationCenter={destinationCenter}
       selectedPlaceId={selectedPlaceId}
       onSelectPlace={setSelectedPlaceId}
       onDeletePlace={readOnly ? undefined : handleDeletePlace}
@@ -103,12 +116,13 @@ export function TripDashboard({
       <TripMap
         hotel={hotel}
         places={mapPlaces}
+        destinationCenter={destinationCenter}
         selectedPlaceId={selectedPlaceId}
         onSelectPlace={setSelectedPlaceId}
         readOnly={readOnly}
       />
     ),
-    [hotel, selectedPlaceId, readOnly]
+    [hotel, destinationCenter, selectedPlaceId, readOnly]
   );
 
   const placesSidebar = (

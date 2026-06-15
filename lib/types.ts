@@ -51,6 +51,8 @@ export interface Trip {
   name: string;
   city: string;
   country: string | null;
+  destination_lat: number | null;
+  destination_lng: number | null;
   start_date: string;
   end_date: string;
   cover_image_url: string | null;
