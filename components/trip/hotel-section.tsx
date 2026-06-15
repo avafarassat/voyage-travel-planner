@@ -8,6 +8,17 @@ import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { PlaceAutocompleteInput } from "@/components/trip/place-autocomplete-input";
+import { HotelExplorePanel } from "@/components/trip/hotel-explore-panel";
+import {
+  defaultHotelExploreQuery,
+  queryForHotelSearch,
+  type HotelExploreResult,
+} from "@/lib/maps/hotel-explore";
+import {
+  USE_MOCK_HOTEL_EXPLORE,
+  friendlyHotelSearchError,
+  getMockHotelExploreResults,
+} from "@/lib/maps/mock-hotel-explore";
 import { toast } from "@/components/ui/use-toast";
 import { formatDate } from "@/lib/utils";
 import type { Hotel } from "@/lib/types";
@@ -19,6 +30,7 @@ interface HotelSectionProps {
   city: string;
   country?: string | null;
   onUpdate: () => void;
+  onExploreActiveChange?: (active: boolean) => void;
   readOnly?: boolean;
 }
 
@@ -38,24 +50,105 @@ export function HotelSection({
   city,
   country,
   onUpdate,
+  onExploreActiveChange,
   readOnly,
 }: HotelSectionProps) {
   const [loading, setLoading] = useState(false);
   const [isEditing, setIsEditing] = useState(false);
   const [showManualForm, setShowManualForm] = useState(false);
-  const [showExplorePlaceholder, setShowExplorePlaceholder] = useState(false);
+  const [showExplore, setShowExplore] = useState(false);
+  const [exploreResults, setExploreResults] = useState<HotelExploreResult[]>([]);
+  const [exploreLoading, setExploreLoading] = useState(false);
+  const [exploreError, setExploreError] = useState<string | null>(null);
+  const [exploreQuery, setExploreQuery] = useState(() => defaultHotelExploreQuery(city, country));
   const [coords, setCoords] = useState<{ lat: number; lng: number } | null>(
     hotel ? { lat: hotel.lat, lng: hotel.lng } : null
   );
   const [form, setForm] = useState(hotelFormState(hotel));
+
+  const defaultExploreQuery = defaultHotelExploreQuery(city, country);
 
   useEffect(() => {
     setForm(hotelFormState(hotel));
     setCoords(hotel ? { lat: hotel.lat, lng: hotel.lng } : null);
     setIsEditing(false);
     setShowManualForm(false);
-    setShowExplorePlaceholder(false);
-  }, [hotel]);
+    setShowExplore(false);
+    setExploreResults([]);
+    setExploreError(null);
+    setExploreQuery(defaultHotelExploreQuery(city, country));
+    onExploreActiveChange?.(false);
+  }, [hotel, city, country, onExploreActiveChange]);
+
+  async function runHotelSearch(displayQuery: string) {
+    setExploreLoading(true);
+    setExploreError(null);
+
+    if (USE_MOCK_HOTEL_EXPLORE) {
+      const mockResults = getMockHotelExploreResults(displayQuery, city, country);
+      setExploreResults(mockResults);
+      if (mockResults.length === 0) {
+        setExploreError("No hotels found — try a different search.");
+      }
+      setExploreLoading(false);
+      return;
+    }
+
+    const apiQuery = queryForHotelSearch(displayQuery, city, country);
+
+    try {
+      const params = new URLSearchParams({
+        query: apiQuery,
+        type: "lodging",
+        limit: "15",
+      });
+      if (city) params.set("city", city);
+      if (country) params.set("country", country);
+
+      const res = await fetch(`/api/places/autocomplete?${params}`);
+      const data = await res.json();
+
+      if (!res.ok) {
+        setExploreResults([]);
+        setExploreError(friendlyHotelSearchError(data.error));
+        return;
+      }
+
+      setExploreResults(data.results ?? []);
+      if (!(data.results?.length ?? 0)) {
+        setExploreError("No hotels found — try a different search.");
+      }
+    } catch {
+      setExploreResults([]);
+      setExploreError("Could not search. Check your connection.");
+    } finally {
+      setExploreLoading(false);
+    }
+  }
+
+  function openManualEntryFromExplore() {
+    closeExplore();
+    setShowManualForm(true);
+  }
+
+  function openExplore() {
+    const query = defaultHotelExploreQuery(city, country);
+    setShowExplore(true);
+    setShowManualForm(false);
+    setIsEditing(false);
+    setExploreQuery(query);
+    setExploreResults([]);
+    setExploreError(null);
+    onExploreActiveChange?.(true);
+    void runHotelSearch(query);
+  }
+
+  function closeExplore() {
+    setShowExplore(false);
+    setExploreResults([]);
+    setExploreError(null);
+    onExploreActiveChange?.(false);
+  }
 
   async function resolveCoordinates() {
     if (coords) {
@@ -116,7 +209,7 @@ export function HotelSection({
 
       setIsEditing(false);
       setShowManualForm(false);
-      setShowExplorePlaceholder(false);
+      closeExplore();
       onUpdate();
     } catch (err) {
       toast({
@@ -134,7 +227,7 @@ export function HotelSection({
     setCoords(hotel ? { lat: hotel.lat, lng: hotel.lng } : null);
     setIsEditing(false);
     setShowManualForm(false);
-    setShowExplorePlaceholder(false);
+    closeExplore();
   }
 
   if (readOnly && hotel) {
@@ -255,6 +348,33 @@ export function HotelSection({
     );
   }
 
+  if (showExplore) {
+    return (
+      <HotelExplorePanel
+        tripId={tripId}
+        hotel={hotel}
+        city={city}
+        country={country}
+        defaultQuery={defaultExploreQuery}
+        results={exploreResults}
+        loading={exploreLoading}
+        error={exploreError}
+        searchQuery={exploreQuery}
+        onSearchQueryChange={setExploreQuery}
+        onSearch={() => void runHotelSearch(exploreQuery)}
+        onBack={closeExplore}
+        onEnterManually={openManualEntryFromExplore}
+        onSaved={() => {
+          closeExplore();
+          onUpdate();
+        }}
+        preserveCheckIn={form.check_in}
+        preserveCheckOut={form.check_out}
+        preserveNotes={form.notes}
+      />
+    );
+  }
+
   if (displayHotel) {
     return (
       <Card>
@@ -269,16 +389,28 @@ export function HotelSection({
                 <span className="truncate">{displayHotel.name}</span>
               </CardTitle>
             </div>
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              className="shrink-0 gap-1"
-              onClick={() => setIsEditing(true)}
-            >
-              <Pencil className="h-3.5 w-3.5" />
-              Edit hotel
-            </Button>
+            <div className="flex shrink-0 flex-wrap justify-end gap-2">
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                className="gap-1"
+                onClick={openExplore}
+              >
+                <Compass className="h-3.5 w-3.5" />
+                Explore hotels
+              </Button>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                className="gap-1"
+                onClick={() => setIsEditing(true)}
+              >
+                <Pencil className="h-3.5 w-3.5" />
+                Edit hotel
+              </Button>
+            </div>
           </div>
         </CardHeader>
         <CardContent className="space-y-4">
@@ -308,40 +440,6 @@ export function HotelSection({
     );
   }
 
-  if (showExplorePlaceholder) {
-    return (
-      <Card>
-        <CardHeader>
-          <CardTitle className="flex items-center gap-2">
-            <Compass className="h-5 w-5 text-violet-600" />
-            Explore hotels
-          </CardTitle>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          <div className="rounded-lg border border-dashed bg-muted/30 px-4 py-8 text-center">
-            <Compass className="mx-auto mb-3 h-10 w-10 text-muted-foreground/70" />
-            <p className="font-medium">Hotel exploration coming next</p>
-            <p className="mt-1 text-sm text-muted-foreground">
-              Search and compare hotels on the map in {city}
-              {country ? `, ${country}` : ""}.
-            </p>
-          </div>
-          <div className="flex flex-wrap gap-2">
-            <Button type="button" variant="outline" onClick={() => setShowExplorePlaceholder(false)}>
-              Back
-            </Button>
-            <Button type="button" variant="outline" onClick={() => {
-              setShowExplorePlaceholder(false);
-              setShowManualForm(true);
-            }}>
-              Enter manually
-            </Button>
-          </div>
-        </CardContent>
-      </Card>
-    );
-  }
-
   return (
     <Card>
       <CardHeader>
@@ -357,11 +455,7 @@ export function HotelSection({
           </p>
         </div>
         <div className="flex flex-col gap-2 sm:flex-row">
-          <Button
-            type="button"
-            className="gap-2 sm:flex-1"
-            onClick={() => setShowExplorePlaceholder(true)}
-          >
+          <Button type="button" className="gap-2 sm:flex-1" onClick={openExplore}>
             Explore hotels
             <ChevronRight className="h-4 w-4" />
           </Button>

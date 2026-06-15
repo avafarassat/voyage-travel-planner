@@ -9,6 +9,9 @@ export interface AutocompleteResult {
   lng: number;
   category?: PlaceCategory;
   photoUrl?: string;
+  rating?: number;
+  userRatingsTotal?: number;
+  priceLevel?: number;
 }
 
 async function searchPlaces(
@@ -37,11 +40,15 @@ function mapResults(
       vicinity?: string;
       geometry: { location: { lat: number; lng: number } };
       photos?: { photo_reference: string }[];
+      rating?: number;
+      user_ratings_total?: number;
+      price_level?: number;
     }[];
   },
-  apiKey: string
+  apiKey: string,
+  limit: number
 ): AutocompleteResult[] {
-  return (data.results ?? []).slice(0, 8).map((place) => ({
+  return (data.results ?? []).slice(0, limit).map((place) => ({
     placeId: place.place_id,
     name: place.name,
     address: place.formatted_address ?? place.vicinity ?? "",
@@ -51,6 +58,9 @@ function mapResults(
     photoUrl: place.photos?.[0]
       ? `https://maps.googleapis.com/maps/api/place/photo?maxwidth=400&photo_reference=${place.photos[0].photo_reference}&key=${apiKey}`
       : undefined,
+    rating: place.rating,
+    userRatingsTotal: place.user_ratings_total,
+    priceLevel: place.price_level,
   }));
 }
 
@@ -59,6 +69,8 @@ export async function GET(request: NextRequest) {
   const city = request.nextUrl.searchParams.get("city");
   const country = request.nextUrl.searchParams.get("country");
   const type = request.nextUrl.searchParams.get("type") ?? "lodging";
+  const limitParam = request.nextUrl.searchParams.get("limit");
+  const limit = limitParam ? Math.min(20, Math.max(1, Number(limitParam) || 8)) : 8;
 
   if (!query || query.length < 2) {
     return NextResponse.json({ results: [] });
@@ -83,11 +95,23 @@ export async function GET(request: NextRequest) {
   }
 
   if (data.status !== "OK" && data.status !== "ZERO_RESULTS") {
+    const hint = `${data.status ?? ""} ${data.error_message ?? ""}`.toLowerCase();
+    const unavailable =
+      data.status === "OVER_QUERY_LIMIT" ||
+      data.status === "REQUEST_DENIED" ||
+      hint.includes("quota") ||
+      hint.includes("exceeded");
+
     return NextResponse.json(
-      { error: data.error_message ?? data.status ?? "Search failed" },
+      {
+        error: unavailable
+          ? "Search is temporarily unavailable."
+          : "Search failed. Try again later.",
+        code: unavailable ? "service_unavailable" : "search_failed",
+      },
       { status: 502 }
     );
   }
 
-  return NextResponse.json({ results: mapResults(data, apiKey) });
+  return NextResponse.json({ results: mapResults(data, apiKey, limit) });
 }

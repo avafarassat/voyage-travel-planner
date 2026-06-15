@@ -59,6 +59,7 @@ export function TripDashboard({
   const router = useRouter();
   const [selectedPlaceId, setSelectedPlaceId] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState("map");
+  const [hotelExploreActive, setHotelExploreActive] = useState(false);
 
   const manualPlaces = useMemo(
     () => places.filter(isManualPlace),
@@ -72,7 +73,8 @@ export function TripDashboard({
   const isPlanTab = activeTab === "itinerary";
   const isMapTab = activeTab === "map";
   const isPlacesTab = activeTab === "places";
-  const showSideMap = !isPlanTab && !isMapTab && !isPlacesTab;
+  const showSideMap =
+    !isPlanTab && !isMapTab && !isPlacesTab && !(activeTab === "hotel" && hotelExploreActive);
 
   const handleDeletePlace = useCallback(
     async (id: string) => {
@@ -292,6 +294,7 @@ export function TripDashboard({
                     city={trip.city}
                     country={trip.country}
                     onUpdate={refresh}
+                    onExploreActiveChange={setHotelExploreActive}
                     readOnly={readOnly}
                   />
                 </TabsContent>

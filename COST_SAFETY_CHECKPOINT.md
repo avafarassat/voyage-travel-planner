@@ -184,3 +184,15 @@ ea7bb30 Proxy itinerary photos and add fallback handling
 - **Do not** run Generate or manual backfills / fill-sparse while quota is exhausted unless user asks.
 - When user says “photos work again,” undo **env flags first**, then verify keys/quota — not broad code reverts.
 - Older narrative context may exist in `PROJECT_CONTEXT_V3.md.txt`; **this file is the cost-control source of truth.**
+
+---
+
+## Future roadmap (not implemented)
+
+### Hotel explore — live nightly pricing
+
+- **Future hotel pricing milestone:** connect a real hotel pricing/booking provider before adding nightly rate filters to Hotel Explore.
+- Google Places Text Search provides `priceLevel` ($–$$$$) only — **not** actual nightly rates.
+- **Do not** fake nightly prices from `priceLevel` or other Places fields.
+- Until a trusted pricing source exists, Hotel Explore filters should remain rating + price level only (client-side, no extra Google calls on filter change).
+- Local mock explore (`NEXT_PUBLIC_USE_MOCK_HOTEL_EXPLORE`) should not add fake nightly prices.
