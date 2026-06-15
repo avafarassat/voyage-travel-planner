@@ -46,7 +46,9 @@ import {
   logPoolGoogleTopUp,
   logPoolRead,
   logPoolShortfall,
+  logRestaurantMealFallback,
   mergeSearchResults,
+  recordRestaurantFallbackSkips,
   resolveDestinationForTrip,
   topUpMealsFromGoogle,
   type GenerateFetchPools,
@@ -139,44 +141,44 @@ export async function POST(request: NextRequest) {
 
   const poolFromGlobal =
     poolRows.length > 0
-      ? loadGenerateCandidatePoolsFromDestinationPool(poolRows, interests, dates)
+      ? loadGenerateCandidatePoolsFromDestinationPool(poolRows, interests, dates, thresholds)
       : null;
+
+  if (poolFromGlobal) {
+    logRestaurantMealFallback({
+      slug: destination?.slug ?? null,
+      entries: poolFromGlobal.restaurantMealFallback,
+    });
+  }
+
+  const emptyCounts = {
+    totalLoaded: 0,
+    interestPool: 0,
+    restaurantPool: 0,
+    parksPool: 0,
+    experiencesPool: 0,
+    breakfastTagged: 0,
+    lunchTagged: 0,
+    dinnerTagged: 0,
+    breakfastMealPool: 0,
+    lunchMealPool: 0,
+    dinnerMealPool: 0,
+    activitySightseeing: 0,
+  };
 
   logPoolRead({
     slug: destination?.slug ?? null,
     destinationId: destination?.destinationId ?? null,
     globalCandidatesLoaded: poolRows.length,
-    counts: poolFromGlobal?.counts ?? {
-      totalLoaded: 0,
-      interestPool: 0,
-      restaurantPool: 0,
-      parksPool: 0,
-      experiencesPool: 0,
-      breakfastTagged: 0,
-      lunchTagged: 0,
-      dinnerTagged: 0,
-      activitySightseeing: 0,
-    },
+    counts: poolFromGlobal?.counts ?? emptyCounts,
   });
 
-  const shortfalls = assessPoolShortfalls(
-    poolFromGlobal?.counts ?? {
-      totalLoaded: 0,
-      interestPool: 0,
-      restaurantPool: 0,
-      parksPool: 0,
-      experiencesPool: 0,
-      breakfastTagged: 0,
-      lunchTagged: 0,
-      dinnerTagged: 0,
-      activitySightseeing: 0,
-    },
-    thresholds
-  );
+  const shortfalls = assessPoolShortfalls(poolFromGlobal?.counts ?? emptyCounts, thresholds);
   logPoolShortfall({ slug: destination?.slug ?? null, shortfalls });
 
   const topUpStats: PoolTopUpStats = {
     skippedSufficient: [],
+    skippedRestaurantFallback: [],
     attemptedShort: [],
     skippedQuota: [],
   };
@@ -281,9 +283,9 @@ export async function POST(request: NextRequest) {
   }
 
   const needsAnyMealTopUp =
-    (poolFromGlobal?.counts.breakfastTagged ?? 0) < thresholds.breakfast ||
-    (poolFromGlobal?.counts.lunchTagged ?? 0) < thresholds.lunch ||
-    (poolFromGlobal?.counts.dinnerTagged ?? 0) < thresholds.dinner;
+    (poolFromGlobal?.counts.breakfastMealPool ?? 0) < thresholds.breakfast ||
+    (poolFromGlobal?.counts.lunchMealPool ?? 0) < thresholds.lunch ||
+    (poolFromGlobal?.counts.dinnerMealPool ?? 0) < thresholds.dinner;
 
   if (!poolFromGlobal || needsAnyMealTopUp) {
     if (!poolFromGlobal) {
@@ -322,9 +324,19 @@ export async function POST(request: NextRequest) {
         searchMealPlaces
       );
       mealSuggestions = mealResult.mealSuggestions;
+      recordRestaurantFallbackSkips(
+        poolFromGlobal.restaurantMealFallback,
+        thresholds,
+        topUpStats
+      );
     }
   } else {
     topUpStats.skippedSufficient.push("meal_breakfast", "meal_lunch", "meal_dinner");
+    recordRestaurantFallbackSkips(
+      poolFromGlobal.restaurantMealFallback,
+      thresholds,
+      topUpStats
+    );
   }
 
   logPoolGoogleTopUp({

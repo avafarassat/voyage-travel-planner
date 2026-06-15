@@ -383,7 +383,18 @@ export interface PoolCategoryCounts {
   breakfastTagged: number;
   lunchTagged: number;
   dinnerTagged: number;
+  /** Meal pool size after meal-tag + general restaurant supplement. */
+  breakfastMealPool: number;
+  lunchMealPool: number;
+  dinnerMealPool: number;
   activitySightseeing: number;
+}
+
+export interface RestaurantMealFallbackEntry {
+  meal: MealType;
+  mealTaggedCount: number;
+  fallbackRestaurantCountAdded: number;
+  finalMealPoolCount: number;
 }
 
 export interface PoolShortfall {
@@ -394,6 +405,8 @@ export interface PoolShortfall {
 
 export interface PoolTopUpStats {
   skippedSufficient: string[];
+  /** Meal top-ups skipped because general restaurant pool met threshold. */
+  skippedRestaurantFallback: string[];
   attemptedShort: string[];
   skippedQuota: string[];
 }
@@ -534,6 +547,114 @@ export function computeGeneratePoolThresholds(
 
 function sortPoolRows(rows: DestinationPoolRow[]): DestinationPoolRow[] {
   return [...rows].sort((a, b) => (b.quality_score ?? 0) - (a.quality_score ?? 0));
+}
+
+function isGeneralRestaurantMealFallback(row: DestinationPoolRow): boolean {
+  const isRestaurant =
+    hasPoolTag(row, "restaurant") ||
+    row.primary_category === "restaurant" ||
+    row.is_sit_down_restaurant;
+  if (!isRestaurant) return false;
+  if (row.rating != null && row.rating < 3.0) return false;
+  return true;
+}
+
+function restaurantFallbackSortScore(row: DestinationPoolRow): number {
+  const sitDown =
+    row.is_sit_down_restaurant ||
+    isSitDownRestaurant(row.name, row.google_types ?? [])
+      ? 1000
+      : 0;
+  return sitDown + (row.quality_score ?? 0);
+}
+
+function sortRestaurantFallbackRows(rows: DestinationPoolRow[]): DestinationPoolRow[] {
+  return [...rows].sort(
+    (a, b) => restaurantFallbackSortScore(b) - restaurantFallbackSortScore(a)
+  );
+}
+
+/**
+ * Supplement breakfast/lunch/dinner pools from general restaurant candidates
+ * before any live Google meal top-up.
+ */
+export function supplementMealPoolsFromRestaurantPool(
+  mealPools: Record<MealType, GooglePoolSearchResult[]>,
+  allRows: DestinationPoolRow[],
+  thresholds: Pick<GeneratePoolThresholds, "breakfast" | "lunch" | "dinner">
+): {
+  mealPools: Record<MealType, GooglePoolSearchResult[]>;
+  fallbackLog: RestaurantMealFallbackEntry[];
+} {
+  const mealTypes: MealType[] = ["breakfast", "lunch", "dinner"];
+  const supplemented: Record<MealType, GooglePoolSearchResult[]> = {
+    breakfast: [...mealPools.breakfast],
+    lunch: [...mealPools.lunch],
+    dinner: [...mealPools.dinner],
+  };
+  const fallbackLog: RestaurantMealFallbackEntry[] = [];
+  const fallbackCandidates = sortRestaurantFallbackRows(
+    allRows.filter(isGeneralRestaurantMealFallback)
+  );
+
+  for (const meal of mealTypes) {
+    const mealTaggedCount = mealPools[meal].length;
+    const threshold = thresholds[meal];
+    const seenInMeal = new Set(supplemented[meal].map((p) => p.placeId));
+    let fallbackRestaurantCountAdded = 0;
+
+    if (supplemented[meal].length < threshold) {
+      for (const row of fallbackCandidates) {
+        if (supplemented[meal].length >= threshold) break;
+        if (seenInMeal.has(row.google_place_id)) continue;
+        seenInMeal.add(row.google_place_id);
+        supplemented[meal].push(mapPoolRowToSearchResult(row));
+        fallbackRestaurantCountAdded++;
+      }
+    }
+
+    fallbackLog.push({
+      meal,
+      mealTaggedCount,
+      fallbackRestaurantCountAdded,
+      finalMealPoolCount: supplemented[meal].length,
+    });
+  }
+
+  return { mealPools: supplemented, fallbackLog };
+}
+
+export function logRestaurantMealFallback(params: {
+  slug: string | null;
+  entries: RestaurantMealFallbackEntry[];
+}): void {
+  for (const entry of params.entries) {
+    if (entry.fallbackRestaurantCountAdded === 0) continue;
+    console.info("[candidate-pool] restaurant_meal_fallback", {
+      slug: params.slug,
+      meal: entry.meal,
+      mealTaggedCount: entry.mealTaggedCount,
+      fallbackRestaurantCountAdded: entry.fallbackRestaurantCountAdded,
+      finalMealPoolCount: entry.finalMealPoolCount,
+    });
+  }
+}
+
+/** Record meal Google top-ups skipped because restaurant fallback met threshold. */
+export function recordRestaurantFallbackSkips(
+  fallbackLog: RestaurantMealFallbackEntry[],
+  thresholds: Pick<GeneratePoolThresholds, "breakfast" | "lunch" | "dinner">,
+  topUpStats: PoolTopUpStats
+): void {
+  for (const entry of fallbackLog) {
+    const threshold = thresholds[entry.meal];
+    if (entry.fallbackRestaurantCountAdded > 0 && entry.finalMealPoolCount >= threshold) {
+      const label = `meal_${entry.meal}`;
+      if (!topUpStats.skippedRestaurantFallback.includes(label)) {
+        topUpStats.skippedRestaurantFallback.push(label);
+      }
+    }
+  }
 }
 
 /** Assign unique restaurants across trip dates (mirrors fetchMealsForDates). */
@@ -689,6 +810,9 @@ export function splitDestinationPoolIntoGeneratePools(
       breakfastTagged: breakfastTagged.length,
       lunchTagged: lunchTagged.length,
       dinnerTagged: dinnerTagged.length,
+      breakfastMealPool: breakfastTagged.length,
+      lunchMealPool: lunchTagged.length,
+      dinnerMealPool: dinnerTagged.length,
       activitySightseeing,
     },
   };
@@ -705,9 +829,9 @@ export function assessPoolShortfalls(
     if (have < need) shortfalls.push({ category, have, need });
   };
 
-  check("breakfast", counts.breakfastTagged, thresholds.breakfast);
-  check("lunch", counts.lunchTagged, thresholds.lunch);
-  check("dinner", counts.dinnerTagged, thresholds.dinner);
+  check("breakfast", counts.breakfastMealPool, thresholds.breakfast);
+  check("lunch", counts.lunchMealPool, thresholds.lunch);
+  check("dinner", counts.dinnerMealPool, thresholds.dinner);
   check("restaurant", counts.restaurantPool, thresholds.restaurant);
   check("activity_sightseeing", counts.activitySightseeing, thresholds.activitySightseeing);
   check("parks_nature", counts.parksPool, thresholds.parksNature);
@@ -719,11 +843,30 @@ export function assessPoolShortfalls(
 export function loadGenerateCandidatePoolsFromDestinationPool(
   rows: DestinationPoolRow[],
   interests: TripInterest[],
-  dates: string[]
-): SplitDestinationPoolResult & { mealSuggestions: Map<string, GooglePoolSearchResult> } {
+  dates: string[],
+  thresholds: Pick<GeneratePoolThresholds, "breakfast" | "lunch" | "dinner">
+): SplitDestinationPoolResult & {
+  mealSuggestions: Map<string, GooglePoolSearchResult>;
+  restaurantMealFallback: RestaurantMealFallbackEntry[];
+} {
   const split = splitDestinationPoolIntoGeneratePools(rows, interests);
-  const mealSuggestions = assignMealSuggestionsForDates(dates, split.mealPools);
-  return { ...split, mealSuggestions };
+  const { mealPools: supplementedMealPools, fallbackLog } =
+    supplementMealPoolsFromRestaurantPool(split.mealPools, rows, thresholds);
+
+  const mealSuggestions = assignMealSuggestionsForDates(dates, supplementedMealPools);
+
+  return {
+    ...split,
+    mealPools: supplementedMealPools,
+    mealSuggestions,
+    restaurantMealFallback: fallbackLog,
+    counts: {
+      ...split.counts,
+      breakfastMealPool: supplementedMealPools.breakfast.length,
+      lunchMealPool: supplementedMealPools.lunch.length,
+      dinnerMealPool: supplementedMealPools.dinner.length,
+    },
+  };
 }
 
 export function logPoolRead(params: {
@@ -747,7 +890,14 @@ export function logPoolGoogleTopUp(params: {
   topUpStats: PoolTopUpStats;
   googleFetchedCounts: Partial<Record<string, number>>;
 }): void {
-  console.info("[candidate-pool] google_top_up", params);
+  console.info("[candidate-pool] google_top_up", {
+    slug: params.slug,
+    skippedSufficient: params.topUpStats.skippedSufficient,
+    skippedRestaurantFallback: params.topUpStats.skippedRestaurantFallback,
+    attemptedShort: params.topUpStats.attemptedShort,
+    skippedQuota: params.topUpStats.skippedQuota,
+    googleFetchedCounts: params.googleFetchedCounts,
+  });
 }
 
 export function logPoolGenerateInputs(params: {
@@ -828,12 +978,12 @@ export async function topUpMealsFromGoogle(
 
   for (const meal of mealTypes) {
     const threshold = thresholds[meal];
-    const poolCount = poolMealPools[meal].length;
+    const poolCount = combinedMealPools[meal].length;
     const label = `meal_${meal}`;
 
     if (poolCount >= threshold) {
       topUpStats.skippedSufficient.push(label);
-      for (const place of poolMealPools[meal]) {
+      for (const place of combinedMealPools[meal]) {
         if (!growingExclude.includes(place.placeId)) {
           growingExclude.push(place.placeId);
         }
@@ -843,7 +993,7 @@ export async function topUpMealsFromGoogle(
 
     if (!quotaGate.allowLiveFetch()) {
       topUpStats.skippedQuota.push(label);
-      for (const place of poolMealPools[meal]) {
+      for (const place of combinedMealPools[meal]) {
         if (!growingExclude.includes(place.placeId)) {
           growingExclude.push(place.placeId);
         }
@@ -873,7 +1023,7 @@ export async function topUpMealsFromGoogle(
     }
 
     combinedMealPools[meal] = mergeSearchResults(
-      poolMealPools[meal],
+      combinedMealPools[meal],
       fetched,
       threshold + dates.length
     );
