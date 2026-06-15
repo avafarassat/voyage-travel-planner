@@ -70,6 +70,8 @@ import {
   Plus,
   Loader2,
   X,
+  ChevronDown,
+  ChevronRight,
 } from "lucide-react";
 
 interface ItinerarySectionProps {
@@ -196,6 +198,22 @@ function PlaceThumbnail({
 function isSuggestedStop(stop: ItineraryStop & { place?: Place }): boolean {
   if (stop.stop_type === "rest") return false;
   return stop.is_suggested || stop.place?.source === "suggested";
+}
+
+function dayTimeRange(
+  dayStops: (ItineraryStop & { place?: Place })[],
+  dayDate: string
+): string | null {
+  const times: string[] = [];
+  for (const stop of dayStops) {
+    const t = pinnedStopScheduledTime(stop.scheduled_time, stop.place, dayDate);
+    if (t) times.push(t);
+  }
+  if (times.length === 0) return null;
+  const first = formatTime(times[0]);
+  const last = formatTime(times[times.length - 1]);
+  if (first === last) return first;
+  return `${first} – ${last}`;
 }
 
 function SortableStop({
@@ -479,6 +497,7 @@ export function ItinerarySection({
   const [generating, setGenerating] = useState(false);
   const [reschedulingDayId, setReschedulingDayId] = useState<string | null>(null);
   const [selectedMapDayId, setSelectedMapDayId] = useState<string | null>(null);
+  const [expandedDayIds, setExpandedDayIds] = useState<Set<string>>(() => new Set());
   const [interests, setInterests] = useState<TripInterest[]>(trip.interests ?? []);
   const [dayStartTime, setDayStartTime] = useState(
     timeInputValue(trip.day_start_time, "08:00")
@@ -540,6 +559,25 @@ export function ItinerarySection({
       return days[0].id;
     });
   }, [wideLayout, days]);
+
+  useEffect(() => {
+    if (days.length === 0) return;
+    setExpandedDayIds((prev) => {
+      const stillOpen = [...prev].filter((id) => days.some((d) => d.id === id));
+      if (stillOpen.length > 0) return new Set(stillOpen);
+      return new Set([days[0].id]);
+    });
+  }, [days]);
+
+  function toggleDayExpanded(dayId: string) {
+    setExpandedDayIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(dayId)) next.delete(dayId);
+      else next.add(dayId);
+      return next;
+    });
+    if (wideLayout) setSelectedMapDayId(dayId);
+  }
 
   const selectedMapDay = useMemo(
     () => days.find((d) => d.id === selectedMapDayId) ?? null,
@@ -967,104 +1005,90 @@ export function ItinerarySection({
       )}
 
       {showItinerary &&
-        stopsByDay.map(({ day, stops: dayStops }) => (
-          <Card
-            key={day.id}
-            className={cn(
-              wideLayout &&
-                selectedMapDayId === day.id &&
-                "ring-2 ring-primary ring-offset-2 ring-offset-background"
-            )}
-          >
-            <CardHeader
+        stopsByDay.map(({ day, stops: dayStops }) => {
+          const isExpanded = expandedDayIds.has(day.id);
+          const timeRange = dayTimeRange(dayStops, day.date);
+          const stopCountLabel = `${dayStops.length} stop${dayStops.length === 1 ? "" : "s"}`;
+
+          return (
+            <Card
+              key={day.id}
               className={cn(
-                "flex flex-row flex-wrap items-center justify-between gap-2 pb-2",
-                wideLayout && "cursor-pointer select-none"
+                wideLayout &&
+                  selectedMapDayId === day.id &&
+                  "ring-2 ring-primary ring-offset-2 ring-offset-background"
               )}
-              onClick={() => wideLayout && setSelectedMapDayId(day.id)}
             >
-              <CardTitle className="text-base flex items-center gap-2">
-                Day {day.day_number} — {formatDate(day.date)}
-                {reschedulingDayId === day.id && (
-                  <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />
-                )}
-              </CardTitle>
-              {!readOnly && (
-                <div className="flex gap-2">
-                  <Button
-                    type="button"
-                    variant="outline"
-                    size="sm"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      setAddStopDayId(day.id);
-                      setAddStopMode("saved");
-                      setAddStopAfterId("end");
-                      setAddStopPlaceId("");
-                      setAddStopCategory("bar");
-                      setAddStopPreview(null);
-                    }}
-                  >
-                    <Plus className="h-3.5 w-3.5" />
-                    Add stop
-                  </Button>
-                  <Button
-                    type="button"
-                    variant="outline"
-                    size="sm"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      setRestDayId(day.id);
-                      setRestStartTime(
-                        defaultRestStartTime(day.id, stops, dayStartTime)
-                      );
-                      setRestForRemainder(false);
-                    }}
-                  >
-                    <BedDouble className="h-3.5 w-3.5" />
-                    Add rest
-                  </Button>
-                </div>
-              )}
-            </CardHeader>
-            <CardContent>
-              {dayStops.length === 0 ? (
-                <p className="text-sm text-muted-foreground">
-                  Generate your itinerary to fill this day.
-                </p>
-              ) : readOnly ? (
-                <div className="space-y-1">
-                  {dayStops.map((stop, idx) => {
-                    const prev = dayStops[idx - 1];
-                    const dirKey = prev ? `${prev.id}-${stop.id}` : null;
-                    return (
-                      <SortableStop
-                        key={stop.id}
-                        stop={stop}
-                        dayDate={day.date}
-                        direction={dirKey ? directions[dirKey] : undefined}
-                        hotel={hotel}
-                        tripCity={trip.city}
-                        allPlaces={places}
-                        allStops={stops}
-                        onRefresh={onUpdate}
-                        onRemove={onUpdate}
-                        onPlaceClick={setDetailPlace}
-                        readOnly
-                      />
-                    );
-                  })}
-                </div>
-              ) : (
-                <DndContext
-                  sensors={sensors}
-                  collisionDetection={closestCenter}
-                  onDragEnd={(e) => handleDragEnd(day.id, e)}
+              <CardHeader className="flex flex-row flex-wrap items-center justify-between gap-2 pb-2">
+                <button
+                  type="button"
+                  onClick={() => toggleDayExpanded(day.id)}
+                  aria-expanded={isExpanded}
+                  className="flex min-w-0 flex-1 items-start gap-2 rounded-md text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                 >
-                  <SortableContext
-                    items={dayStops.map((s) => s.id)}
-                    strategy={verticalListSortingStrategy}
-                  >
+                  {isExpanded ? (
+                    <ChevronDown className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
+                  ) : (
+                    <ChevronRight className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
+                  )}
+                  <div className="min-w-0">
+                    <CardTitle className="text-base flex items-center gap-2">
+                      Day {day.day_number} — {formatDate(day.date)}
+                      {reschedulingDayId === day.id && (
+                        <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />
+                      )}
+                    </CardTitle>
+                    {!isExpanded && (
+                      <p className="mt-0.5 text-xs text-muted-foreground">
+                        {stopCountLabel}
+                        {timeRange && ` · ${timeRange}`}
+                      </p>
+                    )}
+                  </div>
+                </button>
+                {!readOnly && (
+                  <div className="flex gap-2">
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      onClick={() => {
+                        setAddStopDayId(day.id);
+                        setAddStopMode("saved");
+                        setAddStopAfterId("end");
+                        setAddStopPlaceId("");
+                        setAddStopCategory("bar");
+                        setAddStopPreview(null);
+                      }}
+                    >
+                      <Plus className="h-3.5 w-3.5" />
+                      Add stop
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      onClick={() => {
+                        setRestDayId(day.id);
+                        setRestStartTime(
+                          defaultRestStartTime(day.id, stops, dayStartTime)
+                        );
+                        setRestForRemainder(false);
+                      }}
+                    >
+                      <BedDouble className="h-3.5 w-3.5" />
+                      Add rest
+                    </Button>
+                  </div>
+                )}
+              </CardHeader>
+              {isExpanded && (
+                <CardContent>
+                  {dayStops.length === 0 ? (
+                    <p className="text-sm text-muted-foreground">
+                      Generate your itinerary to fill this day.
+                    </p>
+                  ) : readOnly ? (
                     <div className="space-y-1">
                       {dayStops.map((stop, idx) => {
                         const prev = dayStops[idx - 1];
@@ -1081,18 +1105,52 @@ export function ItinerarySection({
                             allStops={stops}
                             onRefresh={onUpdate}
                             onRemove={onUpdate}
-                            onEditTime={() => openEditTime(stop)}
                             onPlaceClick={setDetailPlace}
+                            readOnly
                           />
                         );
                       })}
                     </div>
-                  </SortableContext>
-                </DndContext>
+                  ) : (
+                    <DndContext
+                      sensors={sensors}
+                      collisionDetection={closestCenter}
+                      onDragEnd={(e) => handleDragEnd(day.id, e)}
+                    >
+                      <SortableContext
+                        items={dayStops.map((s) => s.id)}
+                        strategy={verticalListSortingStrategy}
+                      >
+                        <div className="space-y-1">
+                          {dayStops.map((stop, idx) => {
+                            const prev = dayStops[idx - 1];
+                            const dirKey = prev ? `${prev.id}-${stop.id}` : null;
+                            return (
+                              <SortableStop
+                                key={stop.id}
+                                stop={stop}
+                                dayDate={day.date}
+                                direction={dirKey ? directions[dirKey] : undefined}
+                                hotel={hotel}
+                                tripCity={trip.city}
+                                allPlaces={places}
+                                allStops={stops}
+                                onRefresh={onUpdate}
+                                onRemove={onUpdate}
+                                onEditTime={() => openEditTime(stop)}
+                                onPlaceClick={setDetailPlace}
+                              />
+                            );
+                          })}
+                        </div>
+                      </SortableContext>
+                    </DndContext>
+                  )}
+                </CardContent>
               )}
-            </CardContent>
-          </Card>
-        ))}
+            </Card>
+          );
+        })}
 
         </div>
       </div>
