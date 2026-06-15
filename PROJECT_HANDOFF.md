@@ -1,6 +1,6 @@
 # Voyage — project handoff
 
-**Last updated:** 2026-06-15 (itinerary builder: rest blocks, candidate Phase 1, open meals issue)  
+**Last updated:** 2026-06-15 (itinerary builder: Phase 1.5 meal diagnostics, rhythm/quota findings, persistent pool direction)  
 **Primary cost-control reference:** [`COST_SAFETY_CHECKPOINT.md`](./COST_SAFETY_CHECKPOINT.md) — read this before any Google-related work.
 
 ---
@@ -68,8 +68,11 @@ Older narrative context may exist in `PROJECT_CONTEXT_V3.md.txt`. For cost contr
 - Smoke-test with **mock modes** when Google quota is exhausted (see env flags below).
 - Raise **Maps JavaScript** quota cautiously if needed for visual map testing only.
 - **Generate empty guard:** when Places returns no candidates, Generate fails with a friendly error and does **not** wipe an existing itinerary (see §8).
-- **Generate uses Places** when the button is clicked — test sparingly; prefer reading server logs from a single run over re-running Generate.
-- **Plan travel times** stay on **local coordinate estimates** only (`lib/itinerary/travel.ts`) — no Directions API from Plan UI.
+- **Generate uses Places** when the button is clicked — test sparingly; prefer reading server logs from a single run over re-running Generate. **Do not repeatedly click Generate** while debugging; one controlled test at a time.
+- **Plan travel times** stay on **local coordinate estimates** only (`lib/itinerary/travel.ts`) — no Directions API from Plan UI. **Do not call Google Directions.**
+- **No automatic Places calls on page load** — searches remain user-initiated (Generate button, autocomplete typing, Discover search, etc.).
+- **Generate still uses live Places** until persistent destination candidate pools are implemented (see §8). After quota exhaustion, `fill-sparse` and `ensure-meals` may still attempt live meal searches unless short-circuited.
+- **Pool refresh (future)** must be **explicit, scheduled, or admin-controlled** — not uncontrolled per page load or per Plan mount.
 
 ### Env flags (local `.env.local`)
 
@@ -227,8 +230,9 @@ Connect a **real hotel pricing/booking provider** before adding nightly rate fil
   - Generate **fails safely** when zero stops are produced.
   - `POST /api/itinerary/generate` returns a **friendly non-200** (503) if `stopCount === 0`, with a user-facing message about Places being unavailable or over quota.
   - **Existing itinerary rows are preserved** — delete/replace only runs after generated `stopCount > 0` is confirmed.
-  - On success, response includes `{ success: true, dayCount, stopCount }`.
-  - UI shows **“Itinerary ready!”** only when `stopCount > 0`; quota/empty failures show the server error or a client fallback message instead.
+  - On success, response includes `{ success: true, dayCount, stopCount, warning? }`. Optional **`warning`** describes missing meals on one or more days (non-blocking).
+  - UI shows **“Itinerary ready!”** when `stopCount > 0`; meal **`warning`** may appear as toast description. **This can look successful even when day quality is too low** (sparse stops, missing lunch/dinner, weak activity density) — quality gates are not yet enforced.
+  - Quota/empty failures show the server error or a client fallback message instead.
   - Google Places **non-OK statuses** are logged server-side in `lib/itinerary/google-places.ts` (status, optional `error_message`, query context — no API keys).
 - Barcelona itinerary had prior fixes for **meal timing**, **anchors**, **opening-hours enrichment**, and **sparse-day rescheduling** (commits `f32cf6c`, `6385f77`).
 
@@ -255,31 +259,125 @@ Addresses later-day itinerary degradation from candidates marked “used” befo
 - Typecheck passed: `npx tsc --noEmit`.
 - Small type fixes bundled in same arc: `app/api/itinerary/refresh-suggestion/route.ts`, `app/api/itinerary/suggest-stop/route.ts` (pass `source` with `google_place_id` to exclusion helper).
 
-**Not in Phase 1 (future phases):** neighborhood clustering, optional home base, durable candidate inventory, full meal rhythm rewrite, regeneration overhaul.
+**Not in Phase 1 (future phases):** neighborhood clustering, optional home base, full meal rhythm rewrite, regeneration overhaul. **Persistent candidate pools** are now the planned next architecture (see below).
 
-### Open issue — generated meals missing (active next problem)
+### Phase 1.5 — meal fallback / diagnostics (implemented, uncommitted)
 
-**Symptom:** A controlled Generate test produced **activities** on the itinerary, but **no generated breakfast/lunch/dinner** unless the user manually added a restaurant. Example: Day 1 had activities but no generated B/L/D.
+Added stronger **generated meal diagnostics** and **meal fallback** behavior without reverting Phase 1 used-marking. `npx tsc --noEmit` passed.
 
-**Assessment:** This looks like an **existing meal-guarantee weakness**, **not** a regression from the candidate-exhaustion fix (`293e420`). Phase 1 deferred used-marking to successful placement, which should not block Day 1 meals.
+**Key files touched:**
 
-**Diagnosis summary:**
+- `app/api/itinerary/generate/route.ts`
+- `components/trip/itinerary-section.tsx`
+- `lib/itinerary/ensure-meals.ts`
+- `lib/itinerary/fill-sparse.ts`
+- `lib/itinerary/generate-diagnostics.ts`
+- `lib/itinerary/smart-generate.ts`
 
-- Meal generation is **best-effort**, not guaranteed. It can **fail silently** through:
-  - `addMeal` / `ensureRequiredMeals` / `topUpSparseDay` in `lib/itinerary/smart-generate.ts`
-  - `fillSparseDaysForTrip` in `lib/itinerary/fill-sparse.ts`
-  - `ensureTripMeals` in `lib/itinerary/ensure-meals.ts`
-- **`topUpSparseDay`** skips a meal entirely when `pickMealSuggestion` returns null (does not always fall through to `addMeal`).
-- Post-generate passes may skip or delete meals via **`mealInsertionBounds`** returning null or **`mealStopsToRemove`** in `lib/itinerary/meal-slots.ts`.
-- **Log observed:** `[ensure-meals] 2026-07-08 breakfast still missing after final sweep` — confirms ensure-meals ran but could not place breakfast for that day.
+**What changed:**
 
-**Diagnostics gap:** User searched terminal logs but did **not** clearly find expected `[itinerary-generate] pools` / `day_below_target` / `result` lines. Possible causes: logs not emitted, logs missed in output, dev server not restarted after code change, or log placement insufficient. **Investigate before next code change.**
+- **`addMeal` / `ensureRequiredMeals` / `topUpSparseDay`** — relaxed meal retry (wider window, allow duplicate brand before leaving meal missing, weak-hours tolerance when reliable hours absent); summarized rejection logging.
+- **`fill-sparse` / `ensure-meals`** — strict then relaxed meal retry; logging when bounds or candidates fail.
+- **Generate route** — post-pass missing-meals summary; optional non-blocking `warning` in JSON response.
+- **UI** — success toast can show meal `warning` as description.
 
-**DB check when debugging:** Query `itinerary_stops` for `stop_type = 'meal'` and `meal_type` on affected days; distinguish “never persisted” vs “present but `place_id` null” (UI shows generic “Stop”).
+**Server logs added/verified (prefix `[itinerary-generate]` unless noted):**
 
-**Expected next work — Phase 1.5:** meal diagnostics + stronger meal fallback/guarantee (do not revert Phase 1 used-marking).
+| Log | Purpose |
+|-----|---------|
+| `[itinerary-generate] start` | Generate route entered |
+| `[itinerary-generate] pools` | Candidate pool sizes at start |
+| `[itinerary-generate] day_below_target` | Low stop count / missing meals / low sightseeing after scheduling |
+| `[itinerary-generate] meal_not_placed` | Summarized meal rejection counts by phase |
+| `[itinerary-generate] result` | Trip-level stop counts per day |
+| `[itinerary-generate] missing_meals_after_generation` | Persisted meal gaps after all post-passes |
+| `[fill-sparse]` | Sparse-day skip/failure reasons |
+| `[ensure-meals]` | Post-generate meal insertion skip/failure reasons |
 
-**Key meal files:** `lib/itinerary/smart-generate.ts` (`addMeal`, `pickMealSuggestion`, `collectMealCandidates`), `lib/itinerary/google-places.ts` (`fetchMealsForDates`, `searchMealPlaces`), `lib/itinerary/ensure-meals.ts`, `lib/itinerary/meal-slots.ts`, `lib/itinerary/meal-locations.ts`.
+**Assessment:** Meal fallback **improved** (breakfast/restaurants started appearing), but **did not fully solve itinerary quality** — especially under **Google Places quota exhaustion** (see below). Phase 1 used-marking semantics remain intact (`pushStop` → `markStopPlaceUsed`; no early `usedGoogleIds` in pickers).
+
+### Controlled Generate result after Phase 1.5 (Barcelona test trip)
+
+After Phase 1.5, a controlled Generate showed **restaurants/meals starting to appear**, but **day rhythm and density still degraded**.
+
+**Example Day 1:** only **Breakfast Club Brunch Barcelona** (breakfast, ~9:30 AM) + **Park Güell** (monument, ~11:38 AM) — missing lunch, afternoon activity, dinner, and optional nightlife/bar.
+
+**Diagnosis (not a reschedule regression):**
+
+- The day was **under-built in memory** during `scheduleStandardDay` + `ensureRequiredMeals` + `topUpSparseDay`, not broken by `rescheduleAllItineraryDaysForTrip` (reschedule updates times only; does not delete stops).
+- Phase 1.5 **fixed breakfast** (consumes morning window); earlier runs had **more activities but no meals**. The tradeoff exposed an **existing sparse-day weakness**, not a new reschedule bug.
+- **`fill-sparse` / `ensure-meals`** did not reliably repair the day when live Google calls failed or quota was exhausted.
+
+**Known sparse-day weaknesses (still open):**
+
+| Weakness | Detail |
+|----------|--------|
+| Lunch/dinner can still fail | Hours, brand dedup, used Google ID, window/deadline — even after relaxed retry |
+| Activity top-up gives up too early | `topUpSparseDay` breaks its activity loop on the **first** failed `addActivities` call |
+| No full-day density guarantee | No hard minimum for B → AM activity → lunch → PM activity → dinner → optional bar |
+| Misleading success UX | API can return **200** + “Itinerary ready!” when day quality is too low; meal `warning` is easy to miss and does not cover low activity density |
+
+**Expected default day rhythm (normal non-excursion day):** breakfast → ≥1 morning activity → lunch → ≥1 afternoon activity → dinner → optional nightlife/bar if interest selected.
+
+**Key meal / scheduler files:** `lib/itinerary/smart-generate.ts`, `lib/itinerary/google-places.ts`, `lib/itinerary/ensure-meals.ts`, `lib/itinerary/fill-sparse.ts`, `lib/itinerary/meal-slots.ts`, `lib/itinerary/meal-locations.ts`, `lib/itinerary/generate-diagnostics.ts`.
+
+### Google quota finding (controlled Generate logs)
+
+Server logs showed repeated Google Places **`OVER_QUERY_LIMIT`** from meal searches during and after Generate, including contexts such as:
+
+- `searchMealPlaces: breakfast — breakfast Barcelona`
+- `searchMealPlaces: lunch — lunch Barcelona`
+- `searchMealPlaces: dinner — dinner Barcelona`
+
+**Problem:** `fillSparseDaysForTrip` and `ensureTripMeals` **kept attempting live meal recovery** after quota was already exhausted on the initial Generate fetch — multiplying failed Places calls without improving the itinerary.
+
+**Final diagnostic observed:**
+
+```
+[itinerary-generate] missing_meals_after_generation
+  dayCount: 8
+  incompleteDayCount: 5
+```
+
+**Product gap:** API still returned **HTTP 200** for a severely incomplete itinerary. Quality gates (non-success or strong warning when most days lack core meals/density) are **not yet implemented**.
+
+### Architecture conclusion — move to persistent candidate pools
+
+The deeper issue: **Generate relies too heavily on live Google calls and temporary in-memory pools.** Each Generate + post-pass cycle re-fetches from Places; when quota is exhausted, scheduling and repair both fail.
+
+**Desired direction:**
+
+| Principle | Intent |
+|-----------|--------|
+| **Google discovers inventory** | Use Places to build and refresh candidate inventory, not to schedule every stop on every run |
+| **Voyage generates from saved inventory** | Generate, regenerate, fill-sparse, refresh-suggestion should prefer stored candidates |
+| **Destination-level pool** | One Generate for a destination should ideally **create or top up** a reusable pool for that city/region |
+| **Cross-trip reuse** | Future users/trips to the same destination reuse the pool |
+| **Periodic refresh** | Refresh stale metadata on a schedule (e.g. ~2 weeks): ratings, open/closed, top up weak categories |
+| **Regenerate** | Reshuffle **unused saved candidates first** — not Google from scratch |
+| **Refresh-suggestion** | Unused trip candidates → global destination candidates → live Google **only as fallback** |
+| **fill-sparse / ensure-meals** | Saved pools first; **short-circuit live Google** after quota exhaustion |
+| **Durable keys** | Store **`google_place_id`** as the stable key; refresh metadata/details on schedule |
+| **No raw photo hoarding** | Avoid storing Google photo bytes; keep proxy/URL policy aligned with cost checkpoint |
+| **Quality gates** | Incomplete itineraries (most days missing meals or below density target) should **not** return normal success |
+
+See **`COST_SAFETY_CHECKPOINT.md`** for current env flags and what remains live today.
+
+### Next planned phase — persistent destination candidate pool design
+
+**Phase name:** Persistent destination candidate pool design
+
+**Goals:**
+
+- Design **global destination candidate pool** (shared per city/destination).
+- Design **trip-specific candidate pool** (subset / usage tracking for a trip).
+- Define **Google Places caching/storage policy** (what to store, TTL, refresh rules).
+- Store **`google_place_id`** as durable keys; refresh stale metadata/details on schedule.
+- Avoid raw photo storage; respect existing photo proxy / disable flags.
+- **Avoid repeated Places calls** after quota exhaustion (pool-first, fail closed on live fetch).
+- Add **quality gates** so severely incomplete itineraries do not return normal `{ success: true }` without a clear degraded response.
+
+**Out of scope for this phase (still later):** neighborhood clustering, optional home base, Directions API, uncontrolled page-load Places.
 
 ---
 
@@ -301,9 +399,11 @@ Addresses later-day itinerary degradation from candidates marked “used” befo
 
 ### Active — itinerary builder
 
-- **Generated meals not guaranteed (Phase 1.5)** — see §8 “Open issue — generated meals missing”. Activities can generate while B/L/D silently fail across `addMeal`, fill-sparse, and ensure-meals.
-- **Generate diagnostics visibility** — confirm `[itinerary-generate]` logs appear on next controlled Generate; restart dev server if needed.
-- **Later-day suggestion quality** — Phase 1 fixed premature candidate exhaustion; clustering, pool persistence, and optional home base remain future phases.
+- **Persistent destination candidate pools (next phase)** — see §8 architecture conclusion. Replace live-Places-per-Generate with saved inventory + scheduled refresh.
+- **Day rhythm / density not guaranteed** — Phase 1.5 improved meals but days can still collapse to breakfast + one activity; `topUpSparseDay` activity repair gives up too early; no full-day density gate.
+- **Quota amplification** — `fill-sparse` and `ensure-meals` still call live Google for meals after Generate exhausts quota; need pool-first + short-circuit.
+- **Success response vs quality** — HTTP 200 + “Itinerary ready!” even when `missing_meals_after_generation` shows most days incomplete; need quality gates.
+- **Later-day suggestion quality** — Phase 1 fixed premature candidate exhaustion; clustering and optional home base remain future phases after persistent pools.
 
 ### General
 
@@ -311,7 +411,7 @@ Addresses later-day itinerary degradation from candidates marked “used” befo
 - **Lazy-load Maps JavaScript** — reduce automatic map load cost (TripMap + hotel explore both load Maps JS).
 - **Live hotel pricing** — requires real provider/booking API before nightly filters (see §7).
 - **Discover photos** — should respect photo-disable/proxy behavior (currently direct Google photo URLs in UI).
-- **Caching / rate limiting** — consider for autocomplete/search routes.
+- **Caching / rate limiting** — persistent destination pools (§8) are the primary planned fix; also consider rate limits on autocomplete/search routes.
 - **DB-level unique trip-name index** — after cleaning any existing duplicate names per user.
 - **Dev banner** — surface when cost-safety or mock flags are active.
 - **Directions routes** — dormant API routes still exist; consider hard-gating or removal.
@@ -361,6 +461,9 @@ lib/itinerary/reschedule-day.ts         — Time chaining, rest intervals, chron
 lib/itinerary/apply-reschedule.ts       — Per-day / trip-wide reschedule DB updates
 lib/itinerary/fill-sparse.ts            — Sparse-day top-up after Generate
 lib/itinerary/ensure-meals.ts           — Last-resort B/L/D insertion after Generate
+lib/itinerary/meal-slots.ts             — Meal insertion bounds, dedup rules
+lib/itinerary/meal-locations.ts         — Meal search location, excursion helpers
+components/trip/itinerary-section.tsx   — Plan UI, Generate handler, meal warning toast
 COST_SAFETY_CHECKPOINT.md               — Cost controls (authoritative)
 .env.example                            — Flag documentation
 ```
