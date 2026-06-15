@@ -74,83 +74,26 @@ async function persistOpeningHours(
 }
 
 /**
- * Stored-data-first opening-hours hydration: DB → destination pool → live details (quota-gated).
- * Mutates `places` in memory when hours are resolved.
+ * Stored-data-first opening-hours hydration: DB → destination pool → live details (last resort).
+ * Skips live Place Details when stored data is schedule-usable without opening hours.
+ * Mutates `places` in memory when hours or coordinates are resolved. Sequential; quota-gated.
  */
-export async function hydratePlacesOpeningHoursStoredFirst(
+async function hydratePlacesStoredFirst(
   supabase: SupabaseClient,
   places: Place[],
   apiKey: string,
   quotaGate: PlacesQuotaGate | undefined,
-  trip: Pick<Trip, "city" | "country"> | undefined,
-  stats?: StoredPlaceHydrationStats
-): Promise<StoredPlaceHydrationStats> {
-  const counts = stats ?? emptyStoredPlaceHydrationStats();
-
-  const needsHours = places.filter(
-    (p) => p.google_place_id && !hasUsableOpeningHours(p.opening_hours)
-  );
-  const poolByGoogleId = trip
-    ? await loadDestinationPoolRowsByGoogleIds(
-        trip,
-        needsHours.map((p) => p.google_place_id!)
-      )
-    : new Map<string, DestinationPoolRow>();
-
-  for (const place of places) {
-    if (!placeHasCoordinates(place)) {
-      counts.missingCoordinates++;
-    }
-
-    if (hasUsableOpeningHours(place.opening_hours)) {
-      counts.fromStoredDb++;
-      continue;
-    }
-
-    if (!place.google_place_id) continue;
-
-    const poolRow = poolByGoogleId.get(place.google_place_id);
-    if (poolRow && poolRowHasUsableHours(poolRow)) {
-      place.opening_hours = poolRow.opening_hours;
-      counts.fromDestinationPool++;
-      await persistOpeningHours(supabase, place.id, poolRow.opening_hours!);
-      continue;
-    }
-
-    if (quotaGate && !quotaGate.allowLiveFetch()) {
-      counts.skippedQuota++;
-      continue;
-    }
-
-    counts.liveDetailsAttempted++;
-    const details = await fetchPlaceDetails(place.google_place_id, apiKey, quotaGate);
-    if (!details?.openingHours) continue;
-
-    place.opening_hours = details.openingHours;
-    await persistOpeningHours(supabase, place.id, details.openingHours);
-  }
-
-  return counts;
-}
-
-/**
- * Pre-generate hydration: stored DB → destination pool → live details (last resort only).
- * Skips live Place Details when stored data is schedule-usable without opening hours.
- * No photos; sequential; quota-gated.
- */
-export async function hydratePlacesForGenerate(
-  supabase: SupabaseClient,
-  trip: Pick<Trip, "city" | "country">,
-  places: Place[],
-  apiKey: string,
-  quotaGate: PlacesQuotaGate
+  trip: Pick<Trip, "city" | "country"> | undefined
 ): Promise<StoredPlaceHydrationStats> {
   const counts = emptyStoredPlaceHydrationStats();
 
   const googlePlaceIds = places
     .map((p) => p.google_place_id)
     .filter((id): id is string => Boolean(id));
-  const poolByGoogleId = await loadDestinationPoolRowsByGoogleIds(trip, googlePlaceIds);
+  const poolByGoogleId =
+    trip && googlePlaceIds.length > 0
+      ? await loadDestinationPoolRowsByGoogleIds(trip, googlePlaceIds)
+      : new Map<string, DestinationPoolRow>();
 
   for (const place of places) {
     const poolRow = place.google_place_id
@@ -170,7 +113,7 @@ export async function hydratePlacesForGenerate(
       counts.scheduleUsableWithoutHours++;
     } else if (!place.google_place_id) {
       // No google id and not schedule-usable — nothing to fetch.
-    } else if (!quotaGate.allowLiveFetch()) {
+    } else if (quotaGate && !quotaGate.allowLiveFetch()) {
       counts.skippedQuota++;
     } else {
       counts.liveDetailsAttempted++;
@@ -189,15 +132,41 @@ export async function hydratePlacesForGenerate(
   return counts;
 }
 
-/** Fetch and persist Google opening hours for places missing them (awaited before reschedule). */
+/** Pre-generate hydration before scheduling. No photos. */
+export async function hydratePlacesForGenerate(
+  supabase: SupabaseClient,
+  trip: Pick<Trip, "city" | "country">,
+  places: Place[],
+  apiKey: string,
+  quotaGate: PlacesQuotaGate
+): Promise<StoredPlaceHydrationStats> {
+  return hydratePlacesStoredFirst(supabase, places, apiKey, quotaGate, trip);
+}
+
+/** Post-generate opening-hours enrichment before reschedule. Pool-first; no photos. */
 export async function enrichPlacesOpeningHours(
   supabase: SupabaseClient,
   places: Place[],
   apiKey: string,
   quotaGate?: PlacesQuotaGate,
   trip?: Pick<Trip, "city" | "country">
-): Promise<void> {
-  await hydratePlacesOpeningHoursStoredFirst(supabase, places, apiKey, quotaGate, trip);
+): Promise<StoredPlaceHydrationStats> {
+  return hydratePlacesStoredFirst(supabase, places, apiKey, quotaGate, trip);
+}
+
+export function mergeStoredPlaceHydrationStats(
+  ...parts: StoredPlaceHydrationStats[]
+): StoredPlaceHydrationStats {
+  const merged = emptyStoredPlaceHydrationStats();
+  for (const part of parts) {
+    merged.fromStoredDb += part.fromStoredDb;
+    merged.fromDestinationPool += part.fromDestinationPool;
+    merged.scheduleUsableWithoutHours += part.scheduleUsableWithoutHours;
+    merged.liveDetailsAttempted += part.liveDetailsAttempted;
+    merged.skippedQuota += part.skippedQuota;
+    merged.missingCoordinates += part.missingCoordinates;
+  }
+  return merged;
 }
 
 /** Refresh missing photos/hours in the background — not used during Generate (scheduling does not need photos). */
