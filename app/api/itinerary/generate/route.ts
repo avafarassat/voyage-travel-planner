@@ -172,6 +172,19 @@ export async function POST(request: NextRequest) {
     mealSuggestions,
   });
 
+  const dayCount = generated.length;
+  const stopCount = generated.reduce((sum, day) => sum + day.stops.length, 0);
+
+  if (stopCount === 0) {
+    return NextResponse.json(
+      {
+        error:
+          "We couldn't generate an itinerary because no nearby places were available. Google Places may be unavailable or over quota. Please try again later or add places manually.",
+      },
+      { status: 503 }
+    );
+  }
+
   const { data: existingDays } = await supabase
     .from("itinerary_days")
     .select("id")
@@ -309,5 +322,5 @@ export async function POST(request: NextRequest) {
   await enrichPlacesOpeningHours(supabase, (allPlacesAfterMeals ?? []) as Place[], apiKey);
   await rescheduleAllItineraryDaysForTrip(supabase, tripId);
 
-  return NextResponse.json({ success: true });
+  return NextResponse.json({ success: true, dayCount, stopCount });
 }

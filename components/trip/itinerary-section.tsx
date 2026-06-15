@@ -531,7 +531,6 @@ export function ItinerarySection({
   const [excludeSuggestIds, setExcludeSuggestIds] = useState<string[]>([]);
   const [loadingPreview, setLoadingPreview] = useState(false);
   const [addingStop, setAddingStop] = useState(false);
-  const pendingGenerateRef = useRef(false);
   const photosBackfilledRef = useRef(false);
   const sparseFillRef = useRef(false);
   const [detailPlace, setDetailPlace] = useState<Place | null>(null);
@@ -672,13 +671,6 @@ export function ItinerarySection({
       });
   }, [hasItinerary, readOnly, trip.id, onUpdate]);
 
-  useEffect(() => {
-    if (pendingGenerateRef.current && !generating) {
-      pendingGenerateRef.current = false;
-      toast({ title: "Itinerary ready!" });
-    }
-  }, [generating]);
-
   async function handleGenerate() {
     if (!hotel) {
       toast({ title: "Add your hotel first", variant: "destructive" });
@@ -693,7 +685,6 @@ export function ItinerarySection({
     }
 
     setGenerating(true);
-    pendingGenerateRef.current = true;
 
     try {
       const res = await fetch("/api/itinerary/generate", {
@@ -707,19 +698,34 @@ export function ItinerarySection({
         }),
       });
 
+      const data = (await res.json().catch(() => ({}))) as {
+        error?: string;
+        success?: boolean;
+        stopCount?: number;
+      };
+
       if (!res.ok) {
-        const data = await res.json();
         throw new Error(data.error ?? "Generation failed");
       }
 
+      const stopCount = typeof data.stopCount === "number" ? data.stopCount : 0;
+      if (!data.success || stopCount <= 0) {
+        toast({
+          title:
+            "No itinerary stops were generated. Please try again later or add places manually.",
+          variant: "destructive",
+        });
+        return;
+      }
+
       onUpdate();
-      setGenerating(false);
+      toast({ title: "Itinerary ready!" });
     } catch (err) {
-      pendingGenerateRef.current = false;
       toast({
         title: err instanceof Error ? err.message : "Generation failed",
         variant: "destructive",
       });
+    } finally {
       setGenerating(false);
     }
   }

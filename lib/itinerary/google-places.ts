@@ -4,6 +4,19 @@ import { isRestaurantBrandUsed } from "@/lib/itinerary/meal-dedup";
 import type { TripInterest } from "@/lib/itinerary/interests";
 import { interestSearchQuery } from "@/lib/itinerary/interests";
 
+function logPlacesApiStatus(
+  context: string,
+  data: { status?: string; error_message?: string }
+): void {
+  const status = data.status ?? "UNKNOWN";
+  if (status === "OK" || status === "ZERO_RESULTS") return;
+  console.warn("[google-places]", {
+    context,
+    status,
+    ...(data.error_message ? { error_message: data.error_message } : {}),
+  });
+}
+
 function mapLegacyPlace(place: {
   place_id: string;
   name: string;
@@ -145,6 +158,7 @@ export async function fetchTopSuggestions(
 
       const res = await fetch(url.toString());
       const data = await res.json();
+      logPlacesApiStatus(`fetchTopSuggestions: ${query}`, data);
       return (data.results ?? []) as Parameters<typeof mapLegacyPlace>[0][];
     })
   );
@@ -200,6 +214,7 @@ export async function fetchParksAndNaturePool(
 
   const nearbyRes = await fetch(nearbyUrl.toString());
   const nearbyData = await nearbyRes.json();
+  logPlacesApiStatus("fetchParksAndNaturePool: nearby park search", nearbyData);
   for (const place of ((nearbyData.results ?? []) as Parameters<typeof mapLegacyPlace>[0][]).slice(
     0,
     15
@@ -222,6 +237,7 @@ export async function fetchParksAndNaturePool(
 
     const res = await fetch(url.toString());
     const data = await res.json();
+    logPlacesApiStatus(`fetchParksAndNaturePool: ${query}`, data);
     for (const place of ((data.results ?? []) as Parameters<typeof mapLegacyPlace>[0][]).slice(
       0,
       10
@@ -287,6 +303,7 @@ export async function fetchExperiencesPool(
 
     const res = await fetch(url.toString());
     const data = await res.json();
+    logPlacesApiStatus(`fetchExperiencesPool: ${query}`, data);
     for (const place of ((data.results ?? []) as Parameters<typeof mapLegacyPlace>[0][]).slice(
       0,
       8
@@ -304,6 +321,7 @@ export async function fetchExperiencesPool(
 
   const agencyRes = await fetch(agencyUrl.toString());
   const agencyData = await agencyRes.json();
+  logPlacesApiStatus("fetchExperiencesPool: nearby travel_agency search", agencyData);
   for (const place of (
     (agencyData.results ?? []) as Parameters<typeof mapLegacyPlace>[0][]
   ).slice(0, 10)) {
@@ -346,6 +364,7 @@ async function searchMealPlaces(
 
     const res = await fetch(url.toString());
     const data = await res.json();
+    logPlacesApiStatus(`searchMealPlaces: ${mealLabel} — ${query}`, data);
     const places = (data.results ?? []) as Parameters<typeof mapLegacyPlace>[0][];
 
     for (const place of places) {
