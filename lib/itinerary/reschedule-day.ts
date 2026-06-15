@@ -409,6 +409,29 @@ export function rhythmSortOrderUpdates(
   return sorted.map((stop, sort_order) => ({ id: stop.id, sort_order }));
 }
 
+/** Reorder sort_order to match rescheduled chronological timeline. */
+export function chronologicalSortOrderUpdates(
+  stops: RescheduleStop[],
+  scheduledTimes: { id: string; scheduled_time: string }[]
+): { id: string; sort_order: number }[] {
+  const timeById = new Map(
+    scheduledTimes.map((u) => [u.id, parseTimeToMinutes(u.scheduled_time)])
+  );
+
+  const sorted = [...stops].sort((a, b) => {
+    const timeA =
+      timeById.get(a.id) ??
+      (a.scheduled_time ? parseTimeToMinutes(a.scheduled_time) : 0);
+    const timeB =
+      timeById.get(b.id) ??
+      (b.scheduled_time ? parseTimeToMinutes(b.scheduled_time) : 0);
+    if (timeA !== timeB) return timeA - timeB;
+    return a.sort_order - b.sort_order;
+  });
+
+  return sorted.map((stop, sort_order) => ({ id: stop.id, sort_order }));
+}
+
 /** Recompute times for stops after a given index (pinned stops keep their set times). */
 export function rescheduleFollowingStops(
   stops: RescheduleStop[],

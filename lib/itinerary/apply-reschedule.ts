@@ -5,7 +5,7 @@ import {
   parseTimeToMinutes,
   rescheduleFollowingStops,
   rescheduleStopsFromOrder,
-  rhythmSortOrderUpdates,
+  chronologicalSortOrderUpdates,
   type RescheduleStop,
 } from "@/lib/itinerary/reschedule-day";
 
@@ -106,7 +106,7 @@ export async function rescheduleItineraryDay(
     day.date ?? dayDate
   );
 
-  const orderUpdates = rhythmSortOrderUpdates(stops);
+  const orderUpdates = chronologicalSortOrderUpdates(stops, updates);
 
   await Promise.all([
     ...updates.map((u) =>
