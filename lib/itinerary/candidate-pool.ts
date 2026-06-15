@@ -1314,3 +1314,25 @@ export async function gatherMealCandidatesForPostPass(params: {
 
   return candidates;
 }
+
+/** Load destination pool rows indexed by google_place_id (for place hydration). */
+export async function loadDestinationPoolRowsByGoogleIds(
+  trip: Pick<Trip, "city" | "country">,
+  googlePlaceIds: string[]
+): Promise<Map<string, DestinationPoolRow>> {
+  const uniqueIds = [...new Set(googlePlaceIds.filter(Boolean))];
+  if (uniqueIds.length === 0) return new Map();
+
+  const destination = await resolveDestinationForTrip(trip);
+  if (!destination) return new Map();
+
+  const rows = await loadDestinationCandidates(destination.destinationId, []);
+  const needed = new Set(uniqueIds);
+  const byGoogleId = new Map<string, DestinationPoolRow>();
+  for (const row of rows) {
+    if (needed.has(row.google_place_id)) {
+      byGoogleId.set(row.google_place_id, row);
+    }
+  }
+  return byGoogleId;
+}

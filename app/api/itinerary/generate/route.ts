@@ -14,8 +14,8 @@ import { generateSmartItinerary } from "@/lib/itinerary/smart-generate";
 import { fillSparseDaysForTrip } from "@/lib/itinerary/fill-sparse";
 import { rescheduleAllItineraryDaysForTrip } from "@/lib/itinerary/apply-reschedule";
 import {
-  enrichPlacesInBackground,
   enrichPlacesOpeningHours,
+  hydratePlacesForGenerate,
 } from "@/lib/itinerary/enrich-places";
 import { getSuggestionExcludeGoogleIds } from "@/lib/itinerary/suggestion-exclusions";
 import { ensureTripMeals } from "@/lib/itinerary/ensure-meals";
@@ -28,6 +28,7 @@ import {
   logGeneratePoolStats,
   logGenerateStart,
   logMissingMealsAfterGeneration,
+  logStoredPlaceHydration,
   type MissingMealsDaySummary,
 } from "@/lib/itinerary/generate-diagnostics";
 import { dayMissingMeals } from "@/lib/itinerary/meal-locations";
@@ -107,7 +108,15 @@ export async function POST(request: NextRequest) {
 
   const places = (placesRaw ?? []) as Place[];
   const quotaGate = createPlacesQuotaGate();
-  enrichPlacesInBackground(supabase, places, trip.city, apiKey, quotaGate);
+
+  const hydrationStats = await hydratePlacesForGenerate(
+    supabase,
+    trip,
+    places,
+    apiKey,
+    quotaGate
+  );
+  logStoredPlaceHydration(hydrationStats);
 
   const { data: existingStopsRaw } = await supabase
     .from("itinerary_stops")
@@ -550,7 +559,7 @@ export async function POST(request: NextRequest) {
     .from("places")
     .select("*")
     .eq("trip_id", tripId);
-  await enrichPlacesOpeningHours(supabase, (allPlaces ?? []) as Place[], apiKey, quotaGate);
+  await enrichPlacesOpeningHours(supabase, (allPlaces ?? []) as Place[], apiKey, quotaGate, trip);
 
   await ensureTripMeals(supabase, tripId, apiKey, quotaGate);
 
@@ -562,7 +571,8 @@ export async function POST(request: NextRequest) {
     supabase,
     (allPlacesAfterMeals ?? []) as Place[],
     apiKey,
-    quotaGate
+    quotaGate,
+    trip
   );
   await rescheduleAllItineraryDaysForTrip(supabase, tripId);
 

@@ -148,6 +148,17 @@ export function logGenerateStart(params: {
   console.info("[itinerary-generate] start", params);
 }
 
+/** Log pre-generate place hydration sources (stored DB / pool / live). */
+export function logStoredPlaceHydration(stats: {
+  fromStoredDb: number;
+  fromDestinationPool: number;
+  liveDetailsAttempted: number;
+  skippedQuota: number;
+  missingCoordinates: number;
+}): void {
+  console.info("[itinerary-generate] stored_place_hydration", stats);
+}
+
 /** Log candidate pool sizes once per Generate (no API keys). */
 export function logGeneratePoolStats(stats: GeneratePoolStats): void {
   console.info("[itinerary-generate] pools", stats);
