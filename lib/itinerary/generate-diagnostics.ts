@@ -197,6 +197,67 @@ export function logQualityGate(
   });
 }
 
+/** Log density repair start for a low-sightseeing day. */
+export function logDensityRepairStart(params: {
+  dayNumber: number;
+  date: string;
+  startingSightseeing: number;
+  targetSightseeing: number;
+  poolSize: number;
+}): void {
+  console.info("[itinerary-generate] density_repair_start", params);
+}
+
+/** Log a stop added during density repair. */
+export function logDensityRepairAdded(params: {
+  dayNumber: number;
+  date: string;
+  placeId: string;
+  name: string;
+  category: string;
+  scheduledTime: string;
+  sightseeingCount: number;
+}): void {
+  console.info("[itinerary-generate] density_repair_added", params);
+}
+
+/** Log when a day is skipped by density repair. */
+export function logDensityRepairSkipped(params: {
+  dayNumber: number;
+  date: string;
+  reason: string;
+  startingSightseeing: number;
+  targetSightseeing: number;
+}): void {
+  console.info("[itinerary-generate] density_repair_skipped", params);
+}
+
+/** Per-day or trip-level density repair summary. */
+export function logDensityRepairSummary(
+  params:
+    | {
+        dayNumber: number;
+        date: string;
+        startingSightseeing: number;
+        targetSightseeing: number;
+        finalSightseeing: number;
+        candidatesConsidered: number;
+        addedCount: number;
+        skippedReasons: Record<string, number>;
+      }
+    | {
+        tripLevel: true;
+        daysConsidered: number;
+        daysRepaired: number;
+        totalAdded: number;
+        totalCandidatesConsidered: number;
+        totalAttempts: number;
+        skippedReasons: Record<string, number>;
+      }
+): void {
+  console.info("[itinerary-generate] density_repair_summary", params);
+}
+
 /** Log trip-level generation outcome once scheduling completes. */
 export function logGenerateResult(
   days: GeneratedDaySummary[],

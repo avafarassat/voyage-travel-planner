@@ -11,6 +11,7 @@ import {
   searchMealPlaces,
 } from "@/lib/itinerary/google-places";
 import { generateSmartItinerary } from "@/lib/itinerary/smart-generate";
+import { repairItineraryDensity } from "@/lib/itinerary/density-repair";
 import { fillSparseDaysForTrip } from "@/lib/itinerary/fill-sparse";
 import { rescheduleAllItineraryDaysForTrip } from "@/lib/itinerary/apply-reschedule";
 import {
@@ -425,8 +426,21 @@ export async function POST(request: NextRequest) {
     mealSuggestions,
   });
 
-  const dayCount = generated.length;
-  const stopCount = generated.reduce((sum, day) => sum + day.stops.length, 0);
+  const { days: repairedDays } = await repairItineraryDensity({
+    days: generated,
+    places,
+    hotel: { lat: hotel.lat, lng: hotel.lng },
+    interests,
+    travelTime,
+    dayStartTime: dayStartTime ?? trip.day_start_time ?? "08:00:00",
+    dayEndTime: dayEndTime ?? trip.day_end_time ?? "22:00:00",
+    interestPool,
+    parksPool,
+    experiencesPool,
+  });
+
+  const dayCount = repairedDays.length;
+  const stopCount = repairedDays.reduce((sum, day) => sum + day.stops.length, 0);
 
   if (stopCount === 0) {
     quotaGate.logSummary();
@@ -495,7 +509,7 @@ export async function POST(request: NextRequest) {
   }
 
   const qualityGate = evaluateItineraryQualityGate({
-    generatedDays: generated,
+    generatedDays: repairedDays,
     tripDayCount: dates.length,
     hotel: { lat: hotel.lat, lng: hotel.lng },
     existing: existingStats,
@@ -540,9 +554,9 @@ export async function POST(request: NextRequest) {
 
   const newSuggestedPlaces = new Map<
     string,
-    NonNullable<(typeof generated)[0]["stops"][0]["suggestedPlace"]>
+    NonNullable<(typeof repairedDays)[0]["stops"][0]["suggestedPlace"]>
   >();
-  for (const day of generated) {
+  for (const day of repairedDays) {
     for (const stop of day.stops) {
       if (
         stop.suggestedPlace &&
@@ -583,7 +597,7 @@ export async function POST(request: NextRequest) {
   const { data: dayRows } = await supabase
     .from("itinerary_days")
     .insert(
-      generated.map((day) => ({
+      repairedDays.map((day) => ({
         trip_id: tripId,
         day_number: day.dayNumber,
         date: day.date,
@@ -598,7 +612,7 @@ export async function POST(request: NextRequest) {
   const dayIdByNumber = new Map(dayRows.map((d) => [d.day_number, d.id]));
   const stopRows: Record<string, unknown>[] = [];
 
-  for (const day of generated) {
+  for (const day of repairedDays) {
     const dayRowId = dayIdByNumber.get(day.dayNumber);
     if (!dayRowId) continue;
 

@@ -862,6 +862,13 @@ function cursorFromStops(stops, hotel, dayStartMinutes) {
         location
     };
 }
+function countSightseeingStops(stops) {
+    return stops.filter((s)=>{
+        if (s.mealType || s.stopType === "meal") return false;
+        const cat = s.place?.category ?? s.suggestedPlace?.category;
+        return cat === "monument" || cat === "museum" || cat === "activity";
+    }).length;
+}
 async function topUpSparseDay(ctx, stops, date, reservedMeals, reservedToday, options) {
     const MIN_STOPS = 5;
     const categories = activityCategoriesForInterests(ctx.interests);
@@ -933,11 +940,23 @@ async function topUpSparseDay(ctx, stops, date, reservedMeals, reservedToday, op
         cursor = cursorFromStops(stops, ctx.hotel, ctx.dayStartMinutes);
     }
     let attempts = 0;
-    while(stops.length < MIN_STOPS && cursor.minutes + 45 < ctx.dayEndMinutes && attempts++ < 10){
+    let consecutiveFailures = 0;
+    const activityDeadline = Math.min(MEAL_WINDOWS.dinner.start - 15, ctx.dayEndMinutes - 45);
+    while(
+        (stops.length < MIN_STOPS || countSightseeingStops(stops) < 2) &&
+        cursor.minutes + 45 < activityDeadline &&
+        attempts++ < 15 &&
+        consecutiveFailures < 3
+    ){
         const before = stops.length;
-        await addActivities(ctx, stops, cursor, [], categories, 1, ctx.dayEndMinutes - 45);
+        const beforeSightseeing = countSightseeingStops(stops);
+        await addActivities(ctx, stops, cursor, [], categories, 1, activityDeadline);
         cursor = cursorFromStops(stops, ctx.hotel, ctx.dayStartMinutes);
-        if (stops.length === before) break;
+        if (stops.length === before && countSightseeingStops(stops) === beforeSightseeing) {
+            consecutiveFailures++;
+        } else {
+            consecutiveFailures = 0;
+        }
     }
     const hasAllMeals = [
         "breakfast",
