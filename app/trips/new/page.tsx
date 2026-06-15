@@ -19,6 +19,10 @@ import {
   getMockDestinationResults,
   USE_MOCK_DESTINATION_AUTOCOMPLETE,
 } from "@/lib/maps/mock-destination-autocomplete";
+import {
+  DUPLICATE_TRIP_NAME_MESSAGE,
+  isDuplicateTripName,
+} from "@/lib/trips/trip-name";
 
 type CountrySource = "empty" | "auto" | "manual";
 
@@ -60,6 +64,8 @@ export default function NewTripPage() {
   const [destinationInput, setDestinationInput] = useState("");
   const [destinationCoords, setDestinationCoords] = useState<DestinationCoords | null>(null);
   const countrySourceRef = useRef<CountrySource>("empty");
+  const nameInputRef = useRef<HTMLInputElement>(null);
+  const [nameError, setNameError] = useState<string | null>(null);
   const [form, setForm] = useState({
     name: "",
     city: "",
@@ -127,6 +133,29 @@ export default function NewTripPage() {
       return;
     }
 
+    const trimmedName = form.name.trim();
+    const { data: existingTrips, error: existingError } = await supabase
+      .from("trips")
+      .select("name")
+      .eq("user_id", user.id);
+
+    if (existingError) {
+      toast({
+        title: "Could not create trip",
+        description: "Something went wrong. Please try again.",
+        variant: "destructive",
+      });
+      setLoading(false);
+      return;
+    }
+
+    if (isDuplicateTripName(trimmedName, (existingTrips ?? []).map((trip) => trip.name))) {
+      setNameError(DUPLICATE_TRIP_NAME_MESSAGE);
+      nameInputRef.current?.focus();
+      setLoading(false);
+      return;
+    }
+
     const params = new URLSearchParams({ city: form.city });
     if (form.country) params.set("country", form.country);
 
@@ -151,7 +180,7 @@ export default function NewTripPage() {
       .from("trips")
       .insert({
         user_id: user.id,
-        name: form.name,
+        name: trimmedName,
         city: form.city,
         country: form.country || null,
         destination_lat: resolvedCoords?.lat ?? null,
@@ -166,7 +195,11 @@ export default function NewTripPage() {
     setLoading(false);
 
     if (error) {
-      toast({ title: "Failed to create trip", description: error.message, variant: "destructive" });
+      toast({
+        title: "Failed to create trip",
+        description: "Something went wrong. Please try again.",
+        variant: "destructive",
+      });
       return;
     }
 
@@ -188,11 +221,19 @@ export default function NewTripPage() {
                 <Label htmlFor="name">Trip name</Label>
                 <Input
                   id="name"
+                  ref={nameInputRef}
                   placeholder="Barcelona Adventure"
                   value={form.name}
-                  onChange={(e) => setForm({ ...form, name: e.target.value })}
+                  onChange={(e) => {
+                    setNameError(null);
+                    setForm({ ...form, name: e.target.value });
+                  }}
                   required
+                  aria-invalid={!!nameError}
                 />
+                {nameError && (
+                  <p className="text-xs text-destructive">{nameError}</p>
+                )}
               </div>
               <div className="space-y-2">
                 <Label htmlFor="destination">Destination</Label>

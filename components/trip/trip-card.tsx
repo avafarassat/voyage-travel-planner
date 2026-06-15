@@ -6,6 +6,7 @@ import { Calendar } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
 import { TripDatesDialog } from "@/components/trip/trip-dates-dialog";
+import { TripDeleteDialog } from "@/components/trip/trip-delete-dialog";
 import { cn, formatDate } from "@/lib/utils";
 import type { Trip } from "@/lib/types";
 
@@ -63,7 +64,10 @@ export function TripCard({ trip, isPast }: TripCardProps) {
             </h3>
             <p className="text-sm text-muted-foreground">{trip.city}</p>
           </Link>
-          {!isPast && <TripDatesDialog trip={trip} variant="icon" />}
+          <div className="flex shrink-0 items-center gap-0.5">
+            {!isPast && <TripDatesDialog trip={trip} variant="icon" />}
+            <TripDeleteDialog tripId={trip.id} tripName={trip.name} />
+          </div>
         </div>
         <Link href={`/trips/${trip.id}`} className="mt-2 flex items-center gap-1 text-xs text-muted-foreground">
           <Calendar className="h-3 w-3" />
