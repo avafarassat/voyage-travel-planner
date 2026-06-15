@@ -37,6 +37,10 @@ import {
   resolveMealStartMinutes,
   type MealSlotStop,
 } from "@/lib/itinerary/meal-slots";
+import {
+  emptyMealRejectionCounts,
+  logMealNotPlaced,
+} from "@/lib/itinerary/generate-diagnostics";
 
 function normalizePlace(row: { place?: unknown }): Place | null {
   const p = row.place;
@@ -196,31 +200,49 @@ async function tryScheduleMealInsertion(
   city: string,
   usedGoogleIds: Set<string>,
   usedMealBrands: Set<string>,
-  apiKey: string
+  apiKey: string,
+  options?: { relaxed?: boolean }
 ): Promise<MealInsertItem | null> {
+  const relaxed = options?.relaxed ?? false;
   const window = MEAL_WINDOWS[meal];
   const candidates = await collectMealCandidates(
     searchAt,
     city,
     meal,
     usedGoogleIds,
-    usedMealBrands,
+    relaxed ? new Set<string>() : usedMealBrands,
     apiKey
   );
   const lunchStartForBreakfast = effectiveLunchStartForBreakfastBounds(workingStops());
   const lunchEndBoundary = lunchStartForBreakfast - MEAL_ACTIVITY_GAP;
+  const rejections = emptyMealRejectionCounts();
+  const notAfter = relaxed ? bounds.notAfter + 60 : bounds.notAfter;
+
+  if (candidates.length === 0) {
+    rejections.noCandidates = 1;
+  }
 
   for (const candidate of candidates) {
-    if (!isSitDownRestaurant(candidate.name)) continue;
-    if (isRestaurantBrandUsed(candidate.name, usedMealBrands)) continue;
+    if (!isSitDownRestaurant(candidate.name)) {
+      rejections.invalidMealCandidate++;
+      continue;
+    }
+    if (!relaxed && isRestaurantBrandUsed(candidate.name, usedMealBrands)) {
+      rejections.duplicateBrand++;
+      continue;
+    }
 
     const mealStart = resolveMealStartMinutes(date, meal, candidate.openingHours, {
       notBefore: bounds.notBefore,
-      notAfter: bounds.notAfter,
+      notAfter,
       lunchStart: lunchStartForBreakfast,
     });
-    if (mealStart == null) continue;
+    if (mealStart == null) {
+      rejections.closedOrHoursFailed++;
+      continue;
+    }
     if (meal === "breakfast" && mealStart + window.duration > lunchEndBoundary) {
+      rejections.outsideMealWindow++;
       continue;
     }
 
@@ -260,6 +282,16 @@ async function tryScheduleMealInsertion(
       scheduled_time: minutesToTimeString(mealStart),
       place_id: placeId,
     };
+  }
+
+  if (!relaxed && candidates.length > 0) {
+    logMealNotPlaced({
+      phase: "ensureTripMeals",
+      date,
+      meal,
+      candidateCount: candidates.length,
+      rejections,
+    });
   }
 
   return null;
@@ -424,13 +456,16 @@ export async function ensureTripMeals(
         { lat: hotel.lat, lng: hotel.lng }
       );
       if (!bounds) {
-        if (meal === "breakfast") {
-          const reason = breakfastInsertionSkipReason(
-            workingStops(),
-            day.date,
-            { lat: hotel.lat, lng: hotel.lng }
-          );
-          if (reason) console.info(`[ensure-meals] ${day.date} skip breakfast: ${reason}`);
+        const reason =
+          meal === "breakfast"
+            ? breakfastInsertionSkipReason(
+                workingStops(),
+                day.date,
+                { lat: hotel.lat, lng: hotel.lng }
+              )
+            : `${meal} insertion bounds unavailable`;
+        if (reason) {
+          console.info(`[ensure-meals] ${day.date} skip ${meal}: ${reason}`);
         }
         continue;
       }
@@ -457,10 +492,29 @@ export async function ensureTripMeals(
       );
       if (inserted) {
         toInsert.push(inserted);
-      } else if (meal === "breakfast") {
-        console.info(
-          `[ensure-meals] ${day.date} breakfast missing after candidate attempts`
+      } else {
+        const relaxedInserted = await tryScheduleMealInsertion(
+          supabase,
+          tripId,
+          day.date,
+          meal,
+          bounds,
+          workingStops,
+          stops,
+          searchAt,
+          trip.city,
+          usedGoogleIds,
+          usedMealBrands,
+          apiKey,
+          { relaxed: true }
         );
+        if (relaxedInserted) {
+          toInsert.push(relaxedInserted);
+        } else {
+          console.info(
+            `[ensure-meals] ${day.date} ${meal} missing after candidate attempts`
+          );
+        }
       }
     }
 

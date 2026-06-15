@@ -44,6 +44,10 @@ import {
   resolveMealStartMinutes,
   type MealSlotStop,
 } from "@/lib/itinerary/meal-slots";
+import {
+  emptyMealRejectionCounts,
+  logMealNotPlaced,
+} from "@/lib/itinerary/generate-diagnostics";
 
 type StopRow = {
   id: string;
@@ -265,13 +269,15 @@ async function resolveMealPlace(
     bounds: { notBefore: number; notAfter: number };
     lunchStart: number | null;
     workingStops: () => MealSlotStop[];
-  }
+  },
+  options?: { relaxed?: boolean }
 ): Promise<{
   placeId: string;
   googlePlaceId: string;
   openingHours?: OpeningHours | null;
   mealStart: number;
 } | null> {
+  const relaxed = options?.relaxed ?? false;
   const window = MEAL_WINDOWS[meal];
   const primary = await fetchMealSuggestionCandidates(
     location.lat,
@@ -280,7 +286,7 @@ async function resolveMealPlace(
     meal,
     [...usedGoogleIds],
     apiKey,
-    [...usedMealBrands]
+    relaxed ? [] : [...usedMealBrands]
   );
   const seen = new Set(primary.map((c) => c.placeId));
   const candidates = [...primary];
@@ -292,7 +298,7 @@ async function resolveMealPlace(
     "restaurant",
     [...usedGoogleIds, ...seen],
     apiKey,
-    [...usedMealBrands]
+    relaxed ? [] : [...usedMealBrands]
   );
   if (alt && !seen.has(alt.placeId)) {
     candidates.push(alt);
@@ -300,9 +306,18 @@ async function resolveMealPlace(
 
   const lunchEndBoundary =
     (placement.lunchStart ?? MEAL_WINDOWS.lunch.start) - MEAL_ACTIVITY_GAP;
+  const rejections = emptyMealRejectionCounts();
+  const notAfter = relaxed ? placement.bounds.notAfter + 60 : placement.bounds.notAfter;
+
+  if (candidates.length === 0) {
+    rejections.noCandidates = 1;
+  }
 
   for (const candidate of candidates) {
-    if (isRestaurantBrandUsed(candidate.name, usedMealBrands)) continue;
+    if (!relaxed && isRestaurantBrandUsed(candidate.name, usedMealBrands)) {
+      rejections.duplicateBrand++;
+      continue;
+    }
 
     let mealStart: number | null;
     if (meal === "breakfast") {
@@ -312,7 +327,7 @@ async function resolveMealPlace(
         candidate.openingHours,
         {
           notBefore: placement.bounds.notBefore,
-          notAfter: placement.bounds.notAfter,
+          notAfter,
           lunchStart: placement.lunchStart,
         }
       );
@@ -325,13 +340,17 @@ async function resolveMealPlace(
         window.duration,
         candidate.openingHours,
         {
-          latestStart: placement.bounds.notAfter,
+          latestStart: notAfter,
           notBefore: placement.bounds.notBefore,
         }
       );
     }
-    if (mealStart == null) continue;
+    if (mealStart == null) {
+      rejections.closedOrHoursFailed++;
+      continue;
+    }
     if (meal === "breakfast" && mealStart + window.duration > lunchEndBoundary) {
+      rejections.outsideMealWindow++;
       continue;
     }
 
@@ -348,6 +367,16 @@ async function resolveMealPlace(
       openingHours: candidate.openingHours ?? null,
       mealStart,
     };
+  }
+
+  if (!relaxed && candidates.length > 0) {
+    logMealNotPlaced({
+      phase: "fillSparseDays",
+      date: placement.date,
+      meal,
+      candidateCount: candidates.length,
+      rejections,
+    });
   }
 
   return null;
@@ -657,7 +686,12 @@ export async function fillSparseDaysForTrip(
         day.date,
         { lat: hotel.lat, lng: hotel.lng }
       );
-      if (!bounds) continue;
+      if (!bounds) {
+        console.info(
+          `[fill-sparse] ${day.date} skip ${meal}: insertion bounds unavailable`
+        );
+        continue;
+      }
 
       const searchAt = getMealSearchLocation(
         meal,
@@ -665,7 +699,7 @@ export async function fillSparseDaysForTrip(
         activityLocs
       );
       const lunchStart = earliestMealStart(workingMealStops(), "lunch");
-      const resolved = await resolveMealPlace(
+      let resolved = await resolveMealPlace(
         supabase,
         tripId,
         meal,
@@ -681,7 +715,31 @@ export async function fillSparseDaysForTrip(
           workingStops: workingMealStops,
         }
       );
-      if (!resolved) continue;
+      if (!resolved) {
+        resolved = await resolveMealPlace(
+          supabase,
+          tripId,
+          meal,
+          searchAt,
+          trip.city,
+          usedGoogleIds,
+          usedMealBrands,
+          apiKey,
+          {
+            date: day.date,
+            bounds,
+            lunchStart,
+            workingStops: workingMealStops,
+          },
+          { relaxed: true }
+        );
+      }
+      if (!resolved) {
+        console.info(
+          `[fill-sparse] ${day.date} ${meal} missing after candidate attempts`
+        );
+        continue;
+      }
       if (isPlaceAlreadyOnDay([...dayStops.map(normalizeStopPlace), ...toAdd.map((s) => ({ place_id: s.place_id ?? null, place: null }))], resolved.placeId, resolved.googlePlaceId)) continue;
 
       toAdd.push({

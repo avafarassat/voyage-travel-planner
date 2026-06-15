@@ -48,8 +48,10 @@ import {
   registerRestaurantBrand,
 } from "@/lib/itinerary/meal-dedup";
 import {
+  emptyMealRejectionCounts,
   logDayScheduleDiagnostics,
   logGenerateResult,
+  logMealNotPlaced,
 } from "@/lib/itinerary/generate-diagnostics";
 
 export interface SuggestedPlaceInput {
@@ -471,37 +473,87 @@ async function addActivities(ctx, stops, cursor, userPlaces, categories, maxCoun
         if (!suggestionPlaced) break;
     }
 }
+function hasReliableOpeningHours(hours) {
+    return Boolean(hours?.periods?.length);
+}
 async function addMeal(ctx, stops, cursor, meal, date, reservedMeals, options) {
-    if (reservedMeals.has(meal)) return;
-    if (!mealsEnabled()) return;
+    if (reservedMeals.has(meal)) return true;
+    if (!mealsEnabled()) return false;
+    const relaxed = options?.relaxed ?? false;
     const window = MEAL_WINDOWS[meal];
-    if (!options?.allowAfterWindow && cursor.minutes > window.end) return;
-    const activityLocs = getActivityLocations(stops);
-    const searchAt = getMealSearchLocation(meal, ctx.hotel, activityLocs);
+    const windowEnd = relaxed ? window.end + 60 : window.end;
+    if (!options?.allowAfterWindow && !relaxed && cursor.minutes > window.end) {
+        const rejections = emptyMealRejectionCounts();
+        rejections.outsideMealWindow = 1;
+        logMealNotPlaced({
+            phase: options?.logContext ?? "addMeal",
+            date,
+            meal,
+            candidateCount: 0,
+            rejections,
+            reason: "cursor_past_window",
+        });
+        return false;
+    }
     const candidates = collectMealCandidates(ctx, meal, date);
-    const isValidMeal = (candidate)=>!candidate.experience && isSitDownRestaurant(candidate.name) && !ctx.manualGoogleIds.has(candidate.placeId);
+    const rejections = emptyMealRejectionCounts();
+    if (candidates.length === 0) {
+        rejections.noCandidates = 1;
+        logMealNotPlaced({
+            phase: options?.logContext ?? "addMeal",
+            date,
+            meal,
+            candidateCount: 0,
+            rejections,
+        });
+        return false;
+    }
+    const allowBrandDup = options?.allowDuplicateBrand ?? relaxed;
+    const isValidMeal = (candidate)=>{
+        if (candidate.experience) return false;
+        if (ctx.manualGoogleIds.has(candidate.placeId)) return false;
+        if (!relaxed && !isSitDownRestaurant(candidate.name)) return false;
+        if (relaxed && isExperienceActivity([], candidate.name)) return false;
+        return true;
+    };
 
     for (const mealSuggestion of candidates) {
-        if (ctx.usedGoogleIds.has(mealSuggestion.placeId)) continue;
-        if (isRestaurantBrandUsed(mealSuggestion.name, ctx.usedMealBrandKeys)) continue;
-        if (!isValidMeal(mealSuggestion)) continue;
+        if (ctx.usedGoogleIds.has(mealSuggestion.placeId)) {
+            rejections.usedGoogleId++;
+            continue;
+        }
+        if (!allowBrandDup && isRestaurantBrandUsed(mealSuggestion.name, ctx.usedMealBrandKeys)) {
+            rejections.duplicateBrand++;
+            continue;
+        }
+        if (ctx.manualGoogleIds.has(mealSuggestion.placeId)) {
+            rejections.manualPlaceExcluded++;
+            continue;
+        }
+        if (!isValidMeal(mealSuggestion)) {
+            rejections.invalidMealCandidate++;
+            continue;
+        }
 
         const travel = await ctx.travelTime(cursor.location, {
             lat: mealSuggestion.lat,
             lng: mealSuggestion.lng
         });
-        let latestStart = options?.allowAfterWindow ? window.end + 60 : window.end;
+        let latestStart = options?.allowAfterWindow || relaxed ? windowEnd + (relaxed ? 30 : 0) : window.end;
         if (options?.latestStart != null) {
             latestStart = Math.min(latestStart, options.latestStart);
         }
+        latestStart = Math.min(latestStart, ctx.dayEndMinutes - window.duration);
 
         let start = Math.max(cursor.minutes + travel, window.start);
         if (options?.notBefore != null) {
             start = Math.max(start, options.notBefore);
         }
-        start = Math.max(start, getMealEarliestMinutes(meal, ctx.date, mealSuggestion.openingHours));
+        if (!relaxed) {
+            start = Math.max(start, getMealEarliestMinutes(meal, ctx.date, mealSuggestion.openingHours));
+        }
 
-        const adjusted = adjustStartForOpeningHours(
+        let adjusted = adjustStartForOpeningHours(
             ctx.date,
             start,
             window.duration,
@@ -509,23 +561,54 @@ async function addMeal(ctx, stops, cursor, meal, date, reservedMeals, options) {
             mealSuggestion.openingHours,
             latestStart
         );
-        if (adjusted == null) continue;
-        start = Math.max(adjusted, getMealEarliestMinutes(meal, ctx.date, mealSuggestion.openingHours));
-        if (options?.latestStart != null && start > options.latestStart) continue;
+        if (adjusted == null) {
+            if (relaxed && !hasReliableOpeningHours(mealSuggestion.openingHours)) {
+                adjusted = Math.min(Math.max(start, window.start), latestStart);
+            } else {
+                rejections.closedOrHoursFailed++;
+                continue;
+            }
+        }
+        start = Math.max(
+            adjusted,
+            relaxed ? window.start : getMealEarliestMinutes(meal, ctx.date, mealSuggestion.openingHours)
+        );
+        if (options?.latestStart != null && start > options.latestStart) {
+            rejections.deadlineOrDayEndFailed++;
+            continue;
+        }
+        if (start > latestStart) {
+            rejections.outsideMealWindow++;
+            continue;
+        }
+        if (start + window.duration > ctx.dayEndMinutes) {
+            rejections.deadlineOrDayEndFailed++;
+            continue;
+        }
 
         await pushStop(ctx, stops, cursor, {
             stopType: "meal",
             suggestedPlace: mealSuggestion,
             mealType: meal,
             durationMinutes: window.duration,
-            suggestionKey: `${date}-${meal}`,
+            suggestionKey: `${date}-${meal}${relaxed ? "-relaxed" : ""}`,
             isSuggested: true,
             scheduledTime: minutesToTimeString(start)
         }, ctx.travelTime);
         reservedMeals.add(meal);
         registerMealInterest(ctx);
-        return;
+        return true;
     }
+
+    logMealNotPlaced({
+        phase: options?.logContext ?? "addMeal",
+        date,
+        meal,
+        candidateCount: candidates.length,
+        rejections,
+        mode: relaxed ? "relaxed" : undefined,
+    });
+    return false;
 }
 async function addBreakfastAfterMorningAnchor(ctx, stops, cursor, date, reservedMeals, anchorPlace) {
     if (reservedMeals.has("breakfast") || stops.some((s)=>s.mealType === "breakfast")) return;
@@ -545,12 +628,13 @@ async function addBreakfastAfterMorningAnchor(ctx, stops, cursor, date, reserved
     });
 }
 async function addMealAtTime(ctx, stops, cursor, meal, date, reservedMeals, startMinutes, beforeAnchorPlace) {
-    if (reservedMeals.has(meal)) return;
-    if (!mealsEnabled()) return;
+    if (reservedMeals.has(meal)) return true;
+    if (!mealsEnabled()) return false;
     const window = MEAL_WINDOWS[meal];
     const activityLocs = getActivityLocations(stops);
     const searchAt = getMealSearchLocation(meal, ctx.hotel, activityLocs);
     const candidates = [];
+    const rejections = emptyMealRejectionCounts();
     const prefetched = ctx.mealSuggestions.get(`${date}-${meal}`);
     if (prefetched && !ctx.usedGoogleIds.has(prefetched.placeId)) candidates.push(prefetched);
     for (const [slotKey, candidate] of ctx.mealSuggestions){
@@ -560,9 +644,30 @@ async function addMealAtTime(ctx, stops, cursor, meal, date, reservedMeals, star
     }
     const fallback = pickMealSuggestion(ctx, searchAt, meal, date, startMinutes);
     if (fallback && !candidates.some((c)=>c.placeId === fallback.placeId)) candidates.push(fallback);
+    if (candidates.length === 0) {
+        rejections.noCandidates = 1;
+        logMealNotPlaced({
+            phase: "addMealAtTime",
+            date,
+            meal,
+            candidateCount: 0,
+            rejections,
+        });
+        return false;
+    }
     for (const candidate of candidates){
-        if (ctx.usedGoogleIds.has(candidate.placeId)) continue;
-        if (!isSitDownRestaurant(candidate.name) || candidate.experience) continue;
+        if (ctx.usedGoogleIds.has(candidate.placeId)) {
+            rejections.usedGoogleId++;
+            continue;
+        }
+        if (isRestaurantBrandUsed(candidate.name, ctx.usedMealBrandKeys)) {
+            rejections.duplicateBrand++;
+            continue;
+        }
+        if (!isSitDownRestaurant(candidate.name) || candidate.experience) {
+            rejections.invalidMealCandidate++;
+            continue;
+        }
         const travel = await ctx.travelTime(ctx.hotel, {
             lat: candidate.lat,
             lng: candidate.lng
@@ -588,7 +693,10 @@ async function addMealAtTime(ctx, stops, cursor, meal, date, reservedMeals, star
             candidate.openingHours,
             latestStart
         );
-        if (adjusted == null) continue;
+        if (adjusted == null) {
+            rejections.closedOrHoursFailed++;
+            continue;
+        }
         start = adjusted;
         if (beforeAnchorPlace?.reservation_time) {
             const anchorMinutes = parseReservationMinutes(beforeAnchorPlace.reservation_time);
@@ -599,7 +707,10 @@ async function addMealAtTime(ctx, stops, cursor, meal, date, reservedMeals, star
                 lat: beforeAnchorPlace.lat,
                 lng: beforeAnchorPlace.lng
             });
-            if (start + window.duration + travelToAnchor > anchorMinutes) continue;
+            if (start + window.duration + travelToAnchor > anchorMinutes) {
+                rejections.deadlineOrDayEndFailed++;
+                continue;
+            }
         }
         cursor.minutes = startMinutes;
         cursor.location = ctx.hotel;
@@ -614,8 +725,16 @@ async function addMealAtTime(ctx, stops, cursor, meal, date, reservedMeals, star
         }, ctx.travelTime);
         reservedMeals.add(meal);
         registerMealInterest(ctx);
-        return;
+        return true;
     }
+    logMealNotPlaced({
+        phase: "addMealAtTime",
+        date,
+        meal,
+        candidateCount: candidates.length,
+        rejections,
+    });
+    return false;
 }
 
 async function scheduleManualPlacesForDay(ctx, stops, cursor, manualToday, deadlineMinutes) {
@@ -758,27 +877,58 @@ async function topUpSparseDay(ctx, stops, date, reservedMeals, reservedToday, op
         const activityLocs = getActivityLocations(stops);
         const searchAt = getMealSearchLocation(meal, ctx.hotel, activityLocs);
         const mealSuggestion = pickMealSuggestion(ctx, searchAt, meal, date, window.start);
-        if (!mealSuggestion) continue;
-        if (cursor.minutes > window.end) {
-            await pushStop(ctx, stops, {
-                minutes: window.start,
-                location: ctx.hotel
-            }, {
-                stopType: "meal",
-                suggestedPlace: mealSuggestion,
-                mealType: meal,
-                durationMinutes: window.duration,
-                suggestionKey: `${date}-${meal}`,
-                isSuggested: true
-            }, ctx.travelTime);
-            reservedMeals.add(meal);
-            registerMealInterest(ctx);
+        if (mealSuggestion) {
+            if (cursor.minutes > window.end) {
+                await pushStop(ctx, stops, {
+                    minutes: window.start,
+                    location: ctx.hotel
+                }, {
+                    stopType: "meal",
+                    suggestedPlace: mealSuggestion,
+                    mealType: meal,
+                    durationMinutes: window.duration,
+                    suggestionKey: `${date}-${meal}`,
+                    isSuggested: true
+                }, ctx.travelTime);
+                reservedMeals.add(meal);
+                registerMealInterest(ctx);
+            } else {
+                const mealCursor = {
+                    minutes: Math.max(cursor.minutes, window.start),
+                    location: cursor.location
+                };
+                await addMeal(ctx, stops, mealCursor, meal, date, reservedMeals, {
+                    logContext: "topUpSparseDay"
+                });
+            }
         } else {
+            const poolCandidates = collectMealCandidates(ctx, meal, date);
+            logMealNotPlaced({
+                phase: "topUpSparseDay_pick",
+                date,
+                meal,
+                candidateCount: poolCandidates.length,
+                rejections: {
+                    ...emptyMealRejectionCounts(),
+                    noCandidates: poolCandidates.length === 0 ? 1 : 0,
+                },
+                reason: "pickMealSuggestion_null",
+            });
             const mealCursor = {
                 minutes: Math.max(cursor.minutes, window.start),
                 location: cursor.location
             };
-            await addMeal(ctx, stops, mealCursor, meal, date, reservedMeals);
+            let placed = await addMeal(ctx, stops, mealCursor, meal, date, reservedMeals, {
+                logContext: "topUpSparseDay_fallback"
+            });
+            if (!placed) {
+                await addMeal(ctx, stops, mealCursor, meal, date, reservedMeals, {
+                    allowAfterWindow: true,
+                    relaxed: true,
+                    allowDuplicateBrand: true,
+                    logContext: "topUpSparseDay_relaxed"
+                });
+            }
         }
         cursor = cursorFromStops(stops, ctx.hotel, ctx.dayStartMinutes);
     }
@@ -823,9 +973,18 @@ async function ensureRequiredMeals(ctx, stops, date, reservedMeals, reservedToda
             : meal === "lunch"
             ? { minutes: window.start, location: cursorFromStops(stops, ctx.hotel, ctx.dayStartMinutes).location }
             : { minutes: window.start, location: ctx.hotel };
-        await addMeal(ctx, stops, mealCursor, meal, date, reservedMeals, {
-            allowAfterWindow: meal === "breakfast"
+        let placed = await addMeal(ctx, stops, mealCursor, meal, date, reservedMeals, {
+            allowAfterWindow: meal === "breakfast",
+            logContext: "ensureRequiredMeals"
         });
+        if (!placed) {
+            await addMeal(ctx, stops, mealCursor, meal, date, reservedMeals, {
+                allowAfterWindow: true,
+                relaxed: true,
+                allowDuplicateBrand: true,
+                logContext: "ensureRequiredMeals_relaxed"
+            });
+        }
     }
     stops.splice(0, stops.length, ...sortDayStopsByRhythm(stops, reservedToday ?? [], date));
 }

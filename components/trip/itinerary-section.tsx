@@ -702,6 +702,7 @@ export function ItinerarySection({
         error?: string;
         success?: boolean;
         stopCount?: number;
+        warning?: string;
       };
 
       if (!res.ok) {
@@ -719,7 +720,10 @@ export function ItinerarySection({
       }
 
       onUpdate();
-      toast({ title: "Itinerary ready!" });
+      toast({
+        title: "Itinerary ready!",
+        ...(data.warning ? { description: data.warning } : {}),
+      });
     } catch (err) {
       toast({
         title: err instanceof Error ? err.message : "Generation failed",

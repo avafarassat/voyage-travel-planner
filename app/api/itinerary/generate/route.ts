@@ -22,7 +22,15 @@ import {
   getManualPlaces,
   googlePlaceIdsForManualPlaces,
 } from "@/lib/itinerary/manual-places";
-import { logGeneratePoolStats } from "@/lib/itinerary/generate-diagnostics";
+import {
+  buildMealGapWarning,
+  logGeneratePoolStats,
+  logGenerateStart,
+  logMissingMealsAfterGeneration,
+  type MissingMealsDaySummary,
+} from "@/lib/itinerary/generate-diagnostics";
+import { dayMissingMeals } from "@/lib/itinerary/meal-locations";
+import type { MealType } from "@/lib/itinerary/hours";
 
 export async function POST(request: NextRequest) {
   const supabase = await createClient();
@@ -96,6 +104,7 @@ export async function POST(request: NextRequest) {
     .eq("id", tripId);
 
   const dates = getTripDates(trip.start_date, trip.end_date);
+  logGenerateStart({ tripId, tripDayCount: dates.length });
   const excludeIds = getSuggestionExcludeGoogleIds(places, existingStops);
 
   const [interestPool, mealSuggestions, restaurantPool, parksPool, experiencesPool] =
@@ -335,5 +344,51 @@ export async function POST(request: NextRequest) {
   await enrichPlacesOpeningHours(supabase, (allPlacesAfterMeals ?? []) as Place[], apiKey);
   await rescheduleAllItineraryDaysForTrip(supabase, tripId);
 
-  return NextResponse.json({ success: true, dayCount, stopCount });
+  const { data: finalDays } = await supabase
+    .from("itinerary_days")
+    .select("id, day_number, date")
+    .eq("trip_id", tripId)
+    .order("day_number");
+
+  const missingMealSummaries: MissingMealsDaySummary[] = [];
+  for (const day of finalDays ?? []) {
+    const { data: dayStops } = await supabase
+      .from("itinerary_stops")
+      .select("stop_type, meal_type, scheduled_time, duration_minutes, place:places(category, reservation_time)")
+      .eq("itinerary_day_id", day.id);
+
+    const missing = dayMissingMeals(
+      (dayStops ?? []).map((s) => {
+        const place = Array.isArray(s.place) ? s.place[0] : s.place;
+        return {
+          meal_type: s.meal_type,
+          stop_type: s.stop_type,
+          scheduled_time: s.scheduled_time,
+          duration_minutes: s.duration_minutes,
+          place: place
+            ? {
+                category: place.category,
+                reservation_time: place.reservation_time,
+              }
+            : null,
+        };
+      })
+    ) as MealType[];
+
+    missingMealSummaries.push({
+      dayNumber: day.day_number,
+      date: day.date,
+      missing,
+    });
+  }
+
+  logMissingMealsAfterGeneration(missingMealSummaries);
+  const warning = buildMealGapWarning(missingMealSummaries, dayCount);
+
+  return NextResponse.json({
+    success: true,
+    dayCount,
+    stopCount,
+    ...(warning ? { warning } : {}),
+  });
 }

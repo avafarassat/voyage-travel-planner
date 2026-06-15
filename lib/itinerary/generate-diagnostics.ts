@@ -1,6 +1,101 @@
 import { dayMissingMeals } from "@/lib/itinerary/meal-locations";
+import type { MealType } from "@/lib/itinerary/hours";
 
 const EXPECTED_MIN_STOPS = 5;
+
+export interface MealRejectionCounts {
+  usedGoogleId: number;
+  duplicateBrand: number;
+  manualPlaceExcluded: number;
+  invalidMealCandidate: number;
+  closedOrHoursFailed: number;
+  outsideMealWindow: number;
+  deadlineOrDayEndFailed: number;
+  noCandidates: number;
+}
+
+export function emptyMealRejectionCounts(): MealRejectionCounts {
+  return {
+    usedGoogleId: 0,
+    duplicateBrand: 0,
+    manualPlaceExcluded: 0,
+    invalidMealCandidate: 0,
+    closedOrHoursFailed: 0,
+    outsideMealWindow: 0,
+    deadlineOrDayEndFailed: 0,
+    noCandidates: 0,
+  };
+}
+
+/** Summarized log when a meal slot could not be filled during generation. */
+export function logMealNotPlaced(params: {
+  phase: string;
+  date: string;
+  dayNumber?: number;
+  meal: MealType;
+  candidateCount: number;
+  rejections: MealRejectionCounts;
+  reason?: string;
+  mode?: string;
+}): void {
+  console.warn("[itinerary-generate] meal_not_placed", params);
+}
+
+export interface MissingMealsDaySummary {
+  dayNumber: number;
+  date: string;
+  missing: MealType[];
+}
+
+/** Log persisted meal gaps after all post-generate passes complete. */
+export function logMissingMealsAfterGeneration(
+  days: MissingMealsDaySummary[]
+): void {
+  const incomplete = days.filter((d) => d.missing.length > 0);
+  if (incomplete.length === 0) {
+    console.info("[itinerary-generate] missing_meals_after_generation", {
+      allDaysComplete: true,
+      dayCount: days.length,
+    });
+    return;
+  }
+
+  console.warn("[itinerary-generate] missing_meals_after_generation", {
+    dayCount: days.length,
+    incompleteDayCount: incomplete.length,
+    days: incomplete.map((d) => ({
+      day: d.dayNumber,
+      date: d.date,
+      missing: d.missing,
+    })),
+  });
+}
+
+/** Non-blocking user-facing warning when many days still lack core meals. */
+export function buildMealGapWarning(
+  days: MissingMealsDaySummary[],
+  totalDays: number
+): string | undefined {
+  if (totalDays === 0 || days.length === 0) return undefined;
+
+  const incomplete = days.filter((d) => d.missing.length > 0);
+  if (incomplete.length === 0) return undefined;
+
+  const severe =
+    incomplete.length >= Math.ceil(totalDays * 0.6) ||
+    incomplete.every((d) => d.missing.length >= 2);
+
+  if (severe) {
+    return "Your itinerary was created, but many days are still missing breakfast, lunch, or dinner. Add restaurants manually or try generating again later.";
+  }
+
+  if (incomplete.length === 1) {
+    const day = incomplete[0];
+    return `Day ${day.dayNumber} is missing ${day.missing.join(", ")}. You can add restaurants manually on the Plan tab.`;
+  }
+
+  return `${incomplete.length} days are missing one or more meals. You can add restaurants manually on the Plan tab.`;
+}
 
 export interface GeneratePoolStats {
   interestPoolCount: number;
@@ -17,6 +112,14 @@ export interface GeneratedDaySummary {
   dayNumber: number;
   date: string;
   stopCount: number;
+}
+
+/** Log once when Generate begins (no API keys). */
+export function logGenerateStart(params: {
+  tripId: string;
+  tripDayCount: number;
+}): void {
+  console.info("[itinerary-generate] start", params);
 }
 
 /** Log candidate pool sizes once per Generate (no API keys). */
