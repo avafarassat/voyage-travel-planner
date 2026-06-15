@@ -3,18 +3,51 @@ import { googleTypeToCategory, isExperienceActivity, isParkOrNaturePlace, isSitD
 import { isRestaurantBrandUsed } from "@/lib/itinerary/meal-dedup";
 import type { TripInterest } from "@/lib/itinerary/interests";
 import { interestSearchQuery } from "@/lib/itinerary/interests";
+import {
+  isQuotaExhaustedStatus,
+  type PlacesQuotaGate,
+} from "@/lib/itinerary/places-quota-gate";
+
+type PlacesApiJson = {
+  status?: string;
+  error_message?: string;
+  results?: unknown;
+  result?: unknown;
+};
 
 function logPlacesApiStatus(
   context: string,
-  data: { status?: string; error_message?: string }
+  data: { status?: string; error_message?: string },
+  quotaGate?: PlacesQuotaGate
 ): void {
   const status = data.status ?? "UNKNOWN";
-  if (status === "OK" || status === "ZERO_RESULTS") return;
+  if (isQuotaExhaustedStatus(status)) {
+    quotaGate?.markQuotaExhausted(context, status);
+    console.warn("[google-places]", { context, status });
+    return;
+  }
+  if (status === "OK" || status === "ZERO_RESULTS" || status === "SKIPPED") return;
   console.warn("[google-places]", {
     context,
     status,
     ...(data.error_message ? { error_message: data.error_message } : {}),
   });
+}
+
+async function fetchPlacesApiJson(
+  url: URL,
+  context: string,
+  quotaGate?: PlacesQuotaGate
+): Promise<PlacesApiJson> {
+  if (quotaGate && !quotaGate.allowLiveFetch()) {
+    quotaGate.recordSkip(context);
+    return { status: "SKIPPED", results: [] };
+  }
+
+  const res = await fetch(url.toString());
+  const data = (await res.json()) as PlacesApiJson;
+  logPlacesApiStatus(context, data, quotaGate);
+  return data;
 }
 
 function mapLegacyPlace(place: {
@@ -115,7 +148,8 @@ export async function fetchPlaceDetailProfile(
 
 export async function fetchPlaceDetails(
   placeId: string,
-  apiKey: string
+  apiKey: string,
+  quotaGate?: PlacesQuotaGate
 ): Promise<{ openingHours?: OpeningHours; rating?: number } | null> {
   const url = new URL("https://maps.googleapis.com/maps/api/place/details/json");
   url.searchParams.set("place_id", placeId);
@@ -125,13 +159,13 @@ export async function fetchPlaceDetails(
   );
   url.searchParams.set("key", apiKey);
 
-  const res = await fetch(url.toString());
-  const data = await res.json();
+  const data = await fetchPlacesApiJson(url, "fetchPlaceDetails", quotaGate);
   if (data.status !== "OK" || !data.result) return null;
 
+  const result = data.result as { opening_hours?: OpeningHours; rating?: number };
   return {
-    openingHours: data.result.opening_hours,
-    rating: data.result.rating,
+    openingHours: result.opening_hours,
+    rating: result.rating,
   };
 }
 
@@ -142,7 +176,8 @@ export async function fetchTopSuggestions(
   interests: TripInterest[],
   excludePlaceIds: string[],
   apiKey: string,
-  limit = 30
+  limit = 30,
+  quotaGate?: PlacesQuotaGate
 ): Promise<(PlaceSearchResult & { openingHours?: OpeningHours })[]> {
   const seen = new Set(excludePlaceIds);
   const results: (PlaceSearchResult & { openingHours?: OpeningHours; score: number })[] = [];
@@ -156,9 +191,11 @@ export async function fetchTopSuggestions(
       url.searchParams.set("radius", "8000");
       url.searchParams.set("key", apiKey);
 
-      const res = await fetch(url.toString());
-      const data = await res.json();
-      logPlacesApiStatus(`fetchTopSuggestions: ${query}`, data);
+      const data = await fetchPlacesApiJson(
+        url,
+        `fetchTopSuggestions: ${query}`,
+        quotaGate
+      );
       return (data.results ?? []) as Parameters<typeof mapLegacyPlace>[0][];
     })
   );
@@ -187,7 +224,8 @@ export async function fetchParksAndNaturePool(
   city: string,
   excludePlaceIds: string[],
   apiKey: string,
-  limit = 30
+  limit = 30,
+  quotaGate?: PlacesQuotaGate
 ): Promise<(PlaceSearchResult & { openingHours?: OpeningHours })[]> {
   const seen = new Set(excludePlaceIds);
   const results: (PlaceSearchResult & {
@@ -212,9 +250,11 @@ export async function fetchParksAndNaturePool(
   nearbyUrl.searchParams.set("type", "park");
   nearbyUrl.searchParams.set("key", apiKey);
 
-  const nearbyRes = await fetch(nearbyUrl.toString());
-  const nearbyData = await nearbyRes.json();
-  logPlacesApiStatus("fetchParksAndNaturePool: nearby park search", nearbyData);
+  const nearbyData = await fetchPlacesApiJson(
+    nearbyUrl,
+    "fetchParksAndNaturePool: nearby park search",
+    quotaGate
+  );
   for (const place of ((nearbyData.results ?? []) as Parameters<typeof mapLegacyPlace>[0][]).slice(
     0,
     15
@@ -235,9 +275,11 @@ export async function fetchParksAndNaturePool(
     url.searchParams.set("radius", "12000");
     url.searchParams.set("key", apiKey);
 
-    const res = await fetch(url.toString());
-    const data = await res.json();
-    logPlacesApiStatus(`fetchParksAndNaturePool: ${query}`, data);
+    const data = await fetchPlacesApiJson(
+      url,
+      `fetchParksAndNaturePool: ${query}`,
+      quotaGate
+    );
     for (const place of ((data.results ?? []) as Parameters<typeof mapLegacyPlace>[0][]).slice(
       0,
       10
@@ -259,7 +301,8 @@ export async function fetchExperiencesPool(
   city: string,
   excludePlaceIds: string[],
   apiKey: string,
-  limit = 30
+  limit = 30,
+  quotaGate?: PlacesQuotaGate
 ): Promise<(PlaceSearchResult & { openingHours?: OpeningHours })[]> {
   const seen = new Set(excludePlaceIds);
   const results: (PlaceSearchResult & {
@@ -301,9 +344,11 @@ export async function fetchExperiencesPool(
     url.searchParams.set("radius", "12000");
     url.searchParams.set("key", apiKey);
 
-    const res = await fetch(url.toString());
-    const data = await res.json();
-    logPlacesApiStatus(`fetchExperiencesPool: ${query}`, data);
+    const data = await fetchPlacesApiJson(
+      url,
+      `fetchExperiencesPool: ${query}`,
+      quotaGate
+    );
     for (const place of ((data.results ?? []) as Parameters<typeof mapLegacyPlace>[0][]).slice(
       0,
       8
@@ -319,9 +364,11 @@ export async function fetchExperiencesPool(
   agencyUrl.searchParams.set("keyword", `tours ${city}`);
   agencyUrl.searchParams.set("key", apiKey);
 
-  const agencyRes = await fetch(agencyUrl.toString());
-  const agencyData = await agencyRes.json();
-  logPlacesApiStatus("fetchExperiencesPool: nearby travel_agency search", agencyData);
+  const agencyData = await fetchPlacesApiJson(
+    agencyUrl,
+    "fetchExperiencesPool: nearby travel_agency search",
+    quotaGate
+  );
   for (const place of (
     (agencyData.results ?? []) as Parameters<typeof mapLegacyPlace>[0][]
   ).slice(0, 10)) {
@@ -342,7 +389,8 @@ async function searchMealPlaces(
   excludePlaceIds: string[],
   apiKey: string,
   needed = 1,
-  radius = 5000
+  radius = 5000,
+  quotaGate?: PlacesQuotaGate
 ): Promise<(PlaceSearchResult & { openingHours?: OpeningHours })[]> {
   const queries = [
     `best ${mealLabel} restaurant in ${city}`,
@@ -355,6 +403,7 @@ async function searchMealPlaces(
 
   for (const query of queries) {
     if (picked.length >= needed) break;
+    if (quotaGate && !quotaGate.allowLiveFetch()) break;
 
     const url = new URL("https://maps.googleapis.com/maps/api/place/textsearch/json");
     url.searchParams.set("query", query);
@@ -362,9 +411,11 @@ async function searchMealPlaces(
     url.searchParams.set("radius", String(radius));
     url.searchParams.set("key", apiKey);
 
-    const res = await fetch(url.toString());
-    const data = await res.json();
-    logPlacesApiStatus(`searchMealPlaces: ${mealLabel} — ${query}`, data);
+    const data = await fetchPlacesApiJson(
+      url,
+      `searchMealPlaces: ${mealLabel} — ${query}`,
+      quotaGate
+    );
     const places = (data.results ?? []) as Parameters<typeof mapLegacyPlace>[0][];
 
     for (const place of places) {
@@ -387,7 +438,8 @@ export async function fetchMealsForDates(
   city: string,
   dates: string[],
   excludePlaceIds: string[],
-  apiKey: string
+  apiKey: string,
+  quotaGate?: PlacesQuotaGate
 ): Promise<Map<string, PlaceSearchResult & { openingHours?: OpeningHours }>> {
   const mealTypes = ["breakfast", "lunch", "dinner"] as const;
   const needed = dates.length;
@@ -408,7 +460,8 @@ export async function fetchMealsForDates(
       growingExclude,
       apiKey,
       needed + 3,
-      meal === "lunch" ? 8000 : 5000
+      meal === "lunch" ? 8000 : 5000,
+      quotaGate
     );
     for (const place of pool) {
       growingExclude.push(place.placeId);
@@ -445,7 +498,8 @@ export async function fetchMealSuggestionCandidates(
   excludePlaceIds: string[],
   apiKey: string,
   excludeBrandKeys: string[] = [],
-  limit = 8
+  limit = 8,
+  quotaGate?: PlacesQuotaGate
 ): Promise<(PlaceSearchResult & { openingHours?: OpeningHours })[]> {
   const pool = await searchMealPlaces(
     lat,
@@ -455,7 +509,8 @@ export async function fetchMealSuggestionCandidates(
     excludePlaceIds,
     apiKey,
     limit,
-    mealLabel === "lunch" ? 8000 : 5000
+    mealLabel === "lunch" ? 8000 : 5000,
+    quotaGate
   );
   const usedBrands = new Set(excludeBrandKeys);
   const candidates: (PlaceSearchResult & { openingHours?: OpeningHours })[] = [];
@@ -476,7 +531,8 @@ export async function fetchMealSuggestion(
   mealLabel: string,
   excludePlaceIds: string[],
   apiKey: string,
-  excludeBrandKeys: string[] = []
+  excludeBrandKeys: string[] = [],
+  quotaGate?: PlacesQuotaGate
 ): Promise<(PlaceSearchResult & { openingHours?: OpeningHours }) | null> {
   const candidates = await fetchMealSuggestionCandidates(
     lat,
@@ -486,7 +542,8 @@ export async function fetchMealSuggestion(
     excludePlaceIds,
     apiKey,
     excludeBrandKeys,
-    1
+    1,
+    quotaGate
   );
   return candidates[0] ?? null;
 }
@@ -500,10 +557,11 @@ export async function resolvePlacePhoto(
     google_place_id?: string | null;
   },
   city: string,
-  apiKey: string
+  apiKey: string,
+  quotaGate?: PlacesQuotaGate
 ): Promise<{ photoUrl: string | null; googlePlaceId?: string } | null> {
   if (place.google_place_id) {
-    const details = await fetchPlaceByGoogleId(place.google_place_id, apiKey);
+    const details = await fetchPlaceByGoogleId(place.google_place_id, apiKey, quotaGate);
     if (!details) return null;
     return {
       photoUrl: details.photoUrl ?? null,
@@ -517,8 +575,11 @@ export async function resolvePlacePhoto(
   url.searchParams.set("radius", "800");
   url.searchParams.set("key", apiKey);
 
-  const res = await fetch(url.toString());
-  const data = await res.json();
+  const data = await fetchPlacesApiJson(
+    url,
+    `resolvePlacePhoto: ${place.name}`,
+    quotaGate
+  );
   const results = (data.results ?? []) as Parameters<typeof mapLegacyPlace>[0][];
 
   let best: (typeof results)[0] | null = null;
@@ -545,7 +606,8 @@ export async function resolvePlacePhoto(
 
 export async function fetchPlaceByGoogleId(
   googlePlaceId: string,
-  apiKey: string
+  apiKey: string,
+  quotaGate?: PlacesQuotaGate
 ): Promise<(PlaceSearchResult & { openingHours?: OpeningHours }) | null> {
   const url = new URL("https://maps.googleapis.com/maps/api/place/details/json");
   url.searchParams.set("place_id", googlePlaceId);
@@ -555,8 +617,7 @@ export async function fetchPlaceByGoogleId(
   );
   url.searchParams.set("key", apiKey);
 
-  const res = await fetch(url.toString());
-  const data = await res.json();
+  const data = await fetchPlacesApiJson(url, "fetchPlaceByGoogleId", quotaGate);
   if (data.status !== "OK" || !data.result) return null;
 
   const place = data.result as {
@@ -580,7 +641,8 @@ export async function fetchAlternativeSuggestion(
   category: PlaceCategory,
   excludePlaceIds: string[],
   apiKey: string,
-  excludeBrandKeys: string[] = []
+  excludeBrandKeys: string[] = [],
+  quotaGate?: PlacesQuotaGate
 ): Promise<(PlaceSearchResult & { openingHours?: OpeningHours }) | null> {
   const labels: Record<PlaceCategory, string> = {
     restaurant: "restaurant",
@@ -597,8 +659,11 @@ export async function fetchAlternativeSuggestion(
   url.searchParams.set("radius", "5000");
   url.searchParams.set("key", apiKey);
 
-  const res = await fetch(url.toString());
-  const data = await res.json();
+  const data = await fetchPlacesApiJson(
+    url,
+    `fetchAlternativeSuggestion: ${category}`,
+    quotaGate
+  );
   const places = (data.results ?? []) as Parameters<typeof mapLegacyPlace>[0][];
   const usedBrands = new Set(excludeBrandKeys);
 

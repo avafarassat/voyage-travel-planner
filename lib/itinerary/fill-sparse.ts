@@ -48,6 +48,7 @@ import {
   emptyMealRejectionCounts,
   logMealNotPlaced,
 } from "@/lib/itinerary/generate-diagnostics";
+import type { PlacesQuotaGate } from "@/lib/itinerary/places-quota-gate";
 
 type StopRow = {
   id: string;
@@ -270,7 +271,8 @@ async function resolveMealPlace(
     lunchStart: number | null;
     workingStops: () => MealSlotStop[];
   },
-  options?: { relaxed?: boolean }
+  options?: { relaxed?: boolean },
+  quotaGate?: PlacesQuotaGate
 ): Promise<{
   placeId: string;
   googlePlaceId: string;
@@ -286,7 +288,9 @@ async function resolveMealPlace(
     meal,
     [...usedGoogleIds],
     apiKey,
-    relaxed ? [] : [...usedMealBrands]
+    relaxed ? [] : [...usedMealBrands],
+    8,
+    quotaGate
   );
   const seen = new Set(primary.map((c) => c.placeId));
   const candidates = [...primary];
@@ -298,7 +302,8 @@ async function resolveMealPlace(
     "restaurant",
     [...usedGoogleIds, ...seen],
     apiKey,
-    relaxed ? [] : [...usedMealBrands]
+    relaxed ? [] : [...usedMealBrands],
+    quotaGate
   );
   if (alt && !seen.has(alt.placeId)) {
     candidates.push(alt);
@@ -441,7 +446,8 @@ async function persistMealCandidate(
 export async function fillSparseDaysForTrip(
   supabase: SupabaseClient,
   tripId: string,
-  apiKey: string
+  apiKey: string,
+  quotaGate?: PlacesQuotaGate
 ): Promise<number> {
   const { data: trip } = await supabase
     .from("trips")
@@ -513,7 +519,8 @@ export async function fillSparseDaysForTrip(
       interests,
       [...usedGoogleIds],
       apiKey,
-      60
+      60,
+      quotaGate
     ),
     fetchParksAndNaturePool(
       hotel.lat,
@@ -521,7 +528,8 @@ export async function fillSparseDaysForTrip(
       trip.city,
       [...usedGoogleIds],
       apiKey,
-      35
+      35,
+      quotaGate
     ),
     fetchExperiencesPool(
       hotel.lat,
@@ -529,7 +537,8 @@ export async function fillSparseDaysForTrip(
       trip.city,
       [...usedGoogleIds],
       apiKey,
-      25
+      25,
+      quotaGate
     ),
   ]);
 
@@ -713,7 +722,9 @@ export async function fillSparseDaysForTrip(
           bounds,
           lunchStart,
           workingStops: workingMealStops,
-        }
+        },
+        undefined,
+        quotaGate
       );
       if (!resolved) {
         resolved = await resolveMealPlace(
@@ -731,7 +742,8 @@ export async function fillSparseDaysForTrip(
             lunchStart,
             workingStops: workingMealStops,
           },
-          { relaxed: true }
+          { relaxed: true },
+          quotaGate
         );
       }
       if (!resolved) {

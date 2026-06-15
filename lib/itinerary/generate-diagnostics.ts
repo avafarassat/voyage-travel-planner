@@ -1,5 +1,6 @@
 import { dayMissingMeals } from "@/lib/itinerary/meal-locations";
 import type { MealType } from "@/lib/itinerary/hours";
+import { QUOTA_EXHAUSTED_USER_MESSAGE } from "@/lib/itinerary/places-quota-gate";
 
 const EXPECTED_MIN_STOPS = 5;
 
@@ -95,6 +96,31 @@ export function buildMealGapWarning(
   }
 
   return `${incomplete.length} days are missing one or more meals. You can add restaurants manually on the Plan tab.`;
+}
+
+function isMateriallyIncompleteMeals(
+  days: MissingMealsDaySummary[],
+  totalDays: number
+): boolean {
+  if (totalDays === 0 || days.length === 0) return false;
+  const incomplete = days.filter((d) => d.missing.length > 0);
+  if (incomplete.length === 0) return false;
+  return (
+    incomplete.length >= Math.ceil(totalDays * 0.6) ||
+    incomplete.some((d) => d.missing.length >= 2)
+  );
+}
+
+/** Merge meal-gap and quota-exhaustion warnings for Generate responses. */
+export function buildGenerateWarning(
+  days: MissingMealsDaySummary[],
+  totalDays: number,
+  quotaExhausted: boolean
+): string | undefined {
+  if (quotaExhausted && isMateriallyIncompleteMeals(days, totalDays)) {
+    return QUOTA_EXHAUSTED_USER_MESSAGE;
+  }
+  return buildMealGapWarning(days, totalDays);
 }
 
 export interface GeneratePoolStats {

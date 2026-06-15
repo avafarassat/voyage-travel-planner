@@ -23,7 +23,7 @@ import {
   googlePlaceIdsForManualPlaces,
 } from "@/lib/itinerary/manual-places";
 import {
-  buildMealGapWarning,
+  buildGenerateWarning,
   logGeneratePoolStats,
   logGenerateStart,
   logMissingMealsAfterGeneration,
@@ -31,6 +31,10 @@ import {
 } from "@/lib/itinerary/generate-diagnostics";
 import { dayMissingMeals } from "@/lib/itinerary/meal-locations";
 import type { MealType } from "@/lib/itinerary/hours";
+import {
+  createPlacesQuotaGate,
+  QUOTA_EXHAUSTED_USER_MESSAGE,
+} from "@/lib/itinerary/places-quota-gate";
 
 export async function POST(request: NextRequest) {
   const supabase = await createClient();
@@ -82,7 +86,8 @@ export async function POST(request: NextRequest) {
   }
 
   const places = (placesRaw ?? []) as Place[];
-  enrichPlacesInBackground(supabase, places, trip.city, apiKey);
+  const quotaGate = createPlacesQuotaGate();
+  enrichPlacesInBackground(supabase, places, trip.city, apiKey, quotaGate);
 
   const { data: existingStopsRaw } = await supabase
     .from("itinerary_stops")
@@ -116,7 +121,8 @@ export async function POST(request: NextRequest) {
       interests,
       excludeIds,
       apiKey,
-      80
+      80,
+      quotaGate
     ),
     fetchMealsForDates(
       hotel.lat,
@@ -124,7 +130,8 @@ export async function POST(request: NextRequest) {
       trip.city,
       dates,
       excludeIds,
-      apiKey
+      apiKey,
+      quotaGate
     ),
     fetchTopSuggestions(
       hotel.lat,
@@ -133,7 +140,8 @@ export async function POST(request: NextRequest) {
       ["restaurants"],
       excludeIds,
       apiKey,
-      40
+      40,
+      quotaGate
     ),
     fetchParksAndNaturePool(
       hotel.lat,
@@ -141,7 +149,8 @@ export async function POST(request: NextRequest) {
       trip.city,
       excludeIds,
       apiKey,
-      35
+      35,
+      quotaGate
     ),
     fetchExperiencesPool(
       hotel.lat,
@@ -149,7 +158,8 @@ export async function POST(request: NextRequest) {
       trip.city,
       excludeIds,
       apiKey,
-      35
+      35,
+      quotaGate
     ),
   ]);
 
@@ -198,10 +208,12 @@ export async function POST(request: NextRequest) {
   const stopCount = generated.reduce((sum, day) => sum + day.stops.length, 0);
 
   if (stopCount === 0) {
+    quotaGate.logSummary();
     return NextResponse.json(
       {
-        error:
-          "We couldn't generate an itinerary because no nearby places were available. Google Places may be unavailable or over quota. Please try again later or add places manually.",
+        error: quotaGate.isQuotaExhausted()
+          ? QUOTA_EXHAUSTED_USER_MESSAGE
+          : "We couldn't generate an itinerary because no nearby places were available. Google Places may be unavailable or over quota. Please try again later or add places manually.",
       },
       { status: 503 }
     );
@@ -327,21 +339,26 @@ export async function POST(request: NextRequest) {
     }
   }
 
-  await fillSparseDaysForTrip(supabase, tripId, apiKey);
+  await fillSparseDaysForTrip(supabase, tripId, apiKey, quotaGate);
 
   const { data: allPlaces } = await supabase
     .from("places")
     .select("*")
     .eq("trip_id", tripId);
-  await enrichPlacesOpeningHours(supabase, (allPlaces ?? []) as Place[], apiKey);
+  await enrichPlacesOpeningHours(supabase, (allPlaces ?? []) as Place[], apiKey, quotaGate);
 
-  await ensureTripMeals(supabase, tripId, apiKey);
+  await ensureTripMeals(supabase, tripId, apiKey, quotaGate);
 
   const { data: allPlacesAfterMeals } = await supabase
     .from("places")
     .select("*")
     .eq("trip_id", tripId);
-  await enrichPlacesOpeningHours(supabase, (allPlacesAfterMeals ?? []) as Place[], apiKey);
+  await enrichPlacesOpeningHours(
+    supabase,
+    (allPlacesAfterMeals ?? []) as Place[],
+    apiKey,
+    quotaGate
+  );
   await rescheduleAllItineraryDaysForTrip(supabase, tripId);
 
   const { data: finalDays } = await supabase
@@ -383,7 +400,12 @@ export async function POST(request: NextRequest) {
   }
 
   logMissingMealsAfterGeneration(missingMealSummaries);
-  const warning = buildMealGapWarning(missingMealSummaries, dayCount);
+  quotaGate.logSummary();
+  const warning = buildGenerateWarning(
+    missingMealSummaries,
+    dayCount,
+    quotaGate.isQuotaExhausted()
+  );
 
   return NextResponse.json({
     success: true,

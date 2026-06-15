@@ -41,6 +41,7 @@ import {
   emptyMealRejectionCounts,
   logMealNotPlaced,
 } from "@/lib/itinerary/generate-diagnostics";
+import type { PlacesQuotaGate } from "@/lib/itinerary/places-quota-gate";
 
 function normalizePlace(row: { place?: unknown }): Place | null {
   const p = row.place;
@@ -153,7 +154,8 @@ async function collectMealCandidates(
   meal: MealType,
   usedGoogleIds: Set<string>,
   usedMealBrands: Set<string>,
-  apiKey: string
+  apiKey: string,
+  quotaGate?: PlacesQuotaGate
 ) {
   const primary = await fetchMealSuggestionCandidates(
     searchAt.lat,
@@ -162,7 +164,9 @@ async function collectMealCandidates(
     meal,
     [...usedGoogleIds],
     apiKey,
-    [...usedMealBrands]
+    [...usedMealBrands],
+    8,
+    quotaGate
   );
   const seen = new Set(primary.map((c) => c.placeId));
   const candidates = [...primary];
@@ -174,7 +178,8 @@ async function collectMealCandidates(
     "restaurant",
     [...usedGoogleIds, ...seen],
     apiKey,
-    [...usedMealBrands]
+    [...usedMealBrands],
+    quotaGate
   );
   if (alt && !seen.has(alt.placeId)) {
     candidates.push(alt);
@@ -201,7 +206,8 @@ async function tryScheduleMealInsertion(
   usedGoogleIds: Set<string>,
   usedMealBrands: Set<string>,
   apiKey: string,
-  options?: { relaxed?: boolean }
+  options?: { relaxed?: boolean },
+  quotaGate?: PlacesQuotaGate
 ): Promise<MealInsertItem | null> {
   const relaxed = options?.relaxed ?? false;
   const window = MEAL_WINDOWS[meal];
@@ -211,7 +217,8 @@ async function tryScheduleMealInsertion(
     meal,
     usedGoogleIds,
     relaxed ? new Set<string>() : usedMealBrands,
-    apiKey
+    apiKey,
+    quotaGate
   );
   const lunchStartForBreakfast = effectiveLunchStartForBreakfastBounds(workingStops());
   const lunchEndBoundary = lunchStartForBreakfast - MEAL_ACTIVITY_GAP;
@@ -304,7 +311,8 @@ async function tryScheduleMealInsertion(
 export async function ensureTripMeals(
   supabase: SupabaseClient,
   tripId: string,
-  apiKey: string
+  apiKey: string,
+  quotaGate?: PlacesQuotaGate
 ): Promise<void> {
   const { data: trip } = await supabase
     .from("trips")
@@ -488,7 +496,9 @@ export async function ensureTripMeals(
         trip.city,
         usedGoogleIds,
         usedMealBrands,
-        apiKey
+        apiKey,
+        undefined,
+        quotaGate
       );
       if (inserted) {
         toInsert.push(inserted);
@@ -506,7 +516,8 @@ export async function ensureTripMeals(
           usedGoogleIds,
           usedMealBrands,
           apiKey,
-          { relaxed: true }
+          { relaxed: true },
+          quotaGate
         );
         if (relaxedInserted) {
           toInsert.push(relaxedInserted);
@@ -657,7 +668,9 @@ export async function ensureTripMeals(
       trip.city,
       usedGoogleIds,
       usedMealBrands,
-      apiKey
+      apiKey,
+      undefined,
+      quotaGate
     );
     if (!inserted) {
       console.info(
