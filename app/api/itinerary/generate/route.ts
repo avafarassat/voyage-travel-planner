@@ -35,6 +35,7 @@ import {
   createPlacesQuotaGate,
   QUOTA_EXHAUSTED_USER_MESSAGE,
 } from "@/lib/itinerary/places-quota-gate";
+import { writeThroughGenerateCandidatePools } from "@/lib/itinerary/candidate-pool";
 
 export async function POST(request: NextRequest) {
   const supabase = await createClient();
@@ -162,6 +163,19 @@ export async function POST(request: NextRequest) {
       quotaGate
     ),
   ]);
+
+  await writeThroughGenerateCandidatePools(
+    trip,
+    { lat: hotel.lat, lng: hotel.lng },
+    interests,
+    {
+      interestPool,
+      restaurantPool,
+      parksPool,
+      experiencesPool,
+      mealSuggestions,
+    }
+  );
 
   const poolSeen = new Set(excludeIds);
   const manualGoogleIds = googlePlaceIdsForManualPlaces(getManualPlaces(places));
