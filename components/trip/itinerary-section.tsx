@@ -164,13 +164,22 @@ function PlaceThumbnail({
   fallbackEmoji?: string;
   color?: string;
 }) {
-  if (place?.photo_url) {
+  const [imgFailed, setImgFailed] = useState(false);
+
+  useEffect(() => {
+    setImgFailed(false);
+  }, [place?.id, place?.photo_url]);
+
+  const showPhoto = place?.photo_url && place.id && !imgFailed;
+
+  if (showPhoto) {
     return (
       // eslint-disable-next-line @next/next/no-img-element
       <img
-        src={place.photo_url}
+        src={`/api/places/photo?placeId=${encodeURIComponent(place.id)}`}
         alt=""
         className="h-10 w-10 shrink-0 rounded-md object-cover"
+        onError={() => setImgFailed(true)}
       />
     );
   }
