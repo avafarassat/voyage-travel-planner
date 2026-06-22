@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
-import { getTripDates, type Place, type TripInterest } from "@/lib/types";
+import { getTripDates, type Place, type PlaceSearchResult, type TripInterest } from "@/lib/types";
 import { MIN_INTERESTS } from "@/lib/itinerary/interests";
 import { createEstimateTravelTimeFn } from "@/lib/itinerary/travel";
 import {
@@ -12,6 +12,7 @@ import {
 } from "@/lib/itinerary/google-places";
 import { generateSmartItinerary } from "@/lib/itinerary/smart-generate";
 import { repairItineraryDensity } from "@/lib/itinerary/density-repair";
+import { repairItineraryMeals } from "@/lib/itinerary/meal-window-repair";
 import { fillSparseDaysForTrip } from "@/lib/itinerary/fill-sparse";
 import { rescheduleAllItineraryDaysForTrip } from "@/lib/itinerary/apply-reschedule";
 import {
@@ -206,6 +207,11 @@ export async function POST(request: NextRequest) {
   let parksPool = poolFromGlobal?.parksPool ?? [];
   let experiencesPool = poolFromGlobal?.experiencesPool ?? [];
   let mealSuggestions = poolFromGlobal?.mealSuggestions ?? new Map();
+  let mealPools = poolFromGlobal?.mealPools ?? {
+    breakfast: [] as PlaceSearchResult[],
+    lunch: [] as PlaceSearchResult[],
+    dinner: [] as PlaceSearchResult[],
+  };
 
   const needsInterestTopUp =
     (poolFromGlobal?.counts.activitySightseeing ?? 0) < thresholds.activitySightseeing;
@@ -341,6 +347,7 @@ export async function POST(request: NextRequest) {
         searchMealPlaces
       );
       mealSuggestions = mealResult.mealSuggestions;
+      mealPools = mealResult.combinedMealPools;
       recordRestaurantFallbackSkips(
         poolFromGlobal.restaurantMealFallback,
         thresholds,
@@ -426,7 +433,7 @@ export async function POST(request: NextRequest) {
     mealSuggestions,
   });
 
-  const { days: repairedDays } = await repairItineraryDensity({
+  const { days: densityRepairedDays } = await repairItineraryDensity({
     days: generated,
     places,
     hotel: { lat: hotel.lat, lng: hotel.lng },
@@ -437,6 +444,18 @@ export async function POST(request: NextRequest) {
     interestPool,
     parksPool,
     experiencesPool,
+  });
+
+  const { days: repairedDays } = await repairItineraryMeals({
+    days: densityRepairedDays,
+    places,
+    hotel: { lat: hotel.lat, lng: hotel.lng },
+    travelTime,
+    dayStartTime: dayStartTime ?? trip.day_start_time ?? "08:00:00",
+    dayEndTime: dayEndTime ?? trip.day_end_time ?? "22:00:00",
+    mealSuggestions,
+    mealPools,
+    restaurantPool,
   });
 
   const dayCount = repairedDays.length;

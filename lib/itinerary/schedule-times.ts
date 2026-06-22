@@ -30,11 +30,10 @@ function parseTimeToMinutes(time: string): number {
 const MEAL_ACTIVITY_GAP = 30;
 
 function isMealClassifiedStop(stop: ScheduleTimeStop): boolean {
-  return Boolean(
-    stop.meal_type ||
-      stop.stop_type === "meal" ||
-      stop.place?.category === "restaurant"
-  );
+  if (stop.meal_type) return true;
+  if (stop.stop_type === "meal") return true;
+  // Restaurant-category sightseeing stops must not block real meal placement.
+  return false;
 }
 
 function isLateNightCategory(category: PlaceCategory): boolean {

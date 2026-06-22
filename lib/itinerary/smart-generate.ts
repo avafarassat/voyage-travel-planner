@@ -53,6 +53,9 @@ import {
   logGenerateResult,
   logMealNotPlaced,
 } from "@/lib/itinerary/generate-diagnostics";
+import {
+  tryInsertMealViaGaps,
+} from "@/lib/itinerary/meal-gap-insert";
 
 export interface SuggestedPlaceInput {
   placeId: string;
@@ -476,6 +479,40 @@ async function addActivities(ctx, stops, cursor, userPlaces, categories, maxCoun
 function hasReliableOpeningHours(hours) {
     return Boolean(hours?.periods?.length);
 }
+function toMealGapStops(stops) {
+    return stops.map((s)=>({
+            stopType: s.stopType,
+            mealType: s.mealType ?? null,
+            scheduledTime: s.scheduledTime,
+            durationMinutes: s.durationMinutes,
+            placeId: s.placeId,
+            place: s.place ? {
+                lat: s.place.lat,
+                lng: s.place.lng,
+                category: s.place.category,
+                reservation_time: s.place.reservation_time,
+                reservation_date: s.place.reservation_date,
+                source: s.place.source,
+                name: s.place.name
+            } : null,
+            suggestedPlace: s.suggestedPlace ? {
+                lat: s.suggestedPlace.lat,
+                lng: s.suggestedPlace.lng,
+                category: s.suggestedPlace.category,
+                name: s.suggestedPlace.name,
+                openingHours: s.suggestedPlace.openingHours
+            } : null
+        }));
+}
+function toMealGapCandidates(candidates) {
+    return candidates.map((c)=>({
+            placeId: c.placeId,
+            name: c.name,
+            lat: c.lat,
+            lng: c.lng,
+            openingHours: c.openingHours ?? null
+        }));
+}
 async function addMeal(ctx, stops, cursor, meal, date, reservedMeals, options) {
     if (reservedMeals.has(meal)) return true;
     if (!mealsEnabled()) return false;
@@ -483,13 +520,51 @@ async function addMeal(ctx, stops, cursor, meal, date, reservedMeals, options) {
     const window = MEAL_WINDOWS[meal];
     const windowEnd = relaxed ? window.end + 60 : window.end;
     if (!options?.allowAfterWindow && !relaxed && cursor.minutes > window.end) {
+        const candidates = collectMealCandidates(ctx, meal, date);
+        const gapResult = await tryInsertMealViaGaps({
+            stops: toMealGapStops(stops),
+            meal,
+            date: ctx.date,
+            hotel: ctx.hotel,
+            dayEndMinutes: ctx.dayEndMinutes,
+            candidates: toMealGapCandidates(candidates),
+            travelTime: ctx.travelTime,
+            usedGoogleIds: ctx.usedGoogleIds,
+            usedMealBrands: ctx.usedMealBrandKeys,
+            manualGoogleIds: ctx.manualGoogleIds,
+            allowDuplicateBrand: options?.allowDuplicateBrand ?? relaxed,
+            relaxed
+        });
+        if (gapResult.success && gapResult.candidate && gapResult.mealStart != null) {
+            const mealSuggestion = candidates.find((c)=>c.placeId === gapResult.candidate.placeId) ?? candidates[0];
+            if (mealSuggestion) {
+                await pushStop(ctx, stops, {
+                    minutes: gapResult.mealStart,
+                    location: {
+                        lat: mealSuggestion.lat,
+                        lng: mealSuggestion.lng
+                    }
+                }, {
+                    stopType: "meal",
+                    suggestedPlace: mealSuggestion,
+                    mealType: meal,
+                    durationMinutes: window.duration,
+                    suggestionKey: `${date}-${meal}-gap`,
+                    isSuggested: true,
+                    scheduledTime: minutesToTimeString(gapResult.mealStart)
+                }, ctx.travelTime);
+                reservedMeals.add(meal);
+                registerMealInterest(ctx);
+                return true;
+            }
+        }
         const rejections = emptyMealRejectionCounts();
         rejections.outsideMealWindow = 1;
         logMealNotPlaced({
             phase: options?.logContext ?? "addMeal",
             date,
             meal,
-            candidateCount: 0,
+            candidateCount: candidates.length,
             rejections,
             reason: "cursor_past_window",
         });

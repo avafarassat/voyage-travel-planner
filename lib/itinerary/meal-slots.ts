@@ -65,9 +65,8 @@ function isSacredReservation(stop: MealSlotStop): boolean {
 
 function effectiveMealType(stop: MealSlotStop): MealType | null {
   if (stop.meal_type) return stop.meal_type as MealType;
-  if (stop.stop_type !== "meal" && stop.place?.category !== "restaurant") {
-    return null;
-  }
+  // Only explicit meal stops count — restaurant visits at meal times are not meals.
+  if (stop.stop_type !== "meal") return null;
   const start = stopStartMinutes(stop);
   if (start == null) return null;
   return inferMealTypeFromMinutes(start);

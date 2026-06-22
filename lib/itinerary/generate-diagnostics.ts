@@ -258,6 +258,67 @@ export function logDensityRepairSummary(
   console.info("[itinerary-generate] density_repair_summary", params);
 }
 
+/** Log meal window repair start for a missing meal slot. */
+export function logMealWindowRepairStart(params: {
+  dayNumber: number;
+  date: string;
+  meal: MealType;
+  candidateCount: number;
+  originalFailureReason?: string;
+}): void {
+  console.info("[itinerary-generate] meal_window_repair_start", params);
+}
+
+/** Log a meal inserted during window-gap repair. */
+export function logMealWindowRepairAdded(params: {
+  dayNumber: number;
+  date: string;
+  meal: MealType;
+  placeId: string;
+  name: string;
+  scheduledTime: string;
+  gapsConsidered: number;
+  candidateCount: number;
+}): void {
+  console.info("[itinerary-generate] meal_window_repair_added", params);
+}
+
+/** Log when meal window repair skips a day or meal. */
+export function logMealWindowRepairSkipped(params: {
+  dayNumber: number;
+  date: string;
+  reason: string;
+  missingMeals?: MealType[];
+  gapsConsidered?: number;
+  candidateCount?: number;
+}): void {
+  console.info("[itinerary-generate] meal_window_repair_skipped", params);
+}
+
+/** Per-day or trip-level meal window repair summary. */
+export function logMealWindowRepairSummary(
+  params:
+    | {
+        dayNumber: number;
+        date: string;
+        missingMealsBefore: MealType[];
+        addedCount: number;
+        finalMissing: MealType[];
+        skippedReasons: Record<string, number>;
+      }
+    | {
+        tripLevel: true;
+        daysConsidered: number;
+        daysRepaired: number;
+        totalAdded: number;
+        totalGapsConsidered: number;
+        totalAttempts: number;
+        skippedReasons: Record<string, number>;
+      }
+): void {
+  console.info("[itinerary-generate] meal_window_repair_summary", params);
+}
+
 /** Log trip-level generation outcome once scheduling completes. */
 export function logGenerateResult(
   days: GeneratedDaySummary[],
